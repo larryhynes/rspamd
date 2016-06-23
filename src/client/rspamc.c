@@ -20,7 +20,6 @@
 #include "rspamdclient.h"
 #include "utlist.h"
 #include "unix-std.h"
-
 #ifdef HAVE_SYS_WAIT_H
 #include <sys/wait.h>
 #endif
@@ -1378,46 +1377,60 @@ rspamc_process_dir (struct event_base *ev_base, struct rspamc_command *cmd,
 	const gchar *name, GQueue *attrs)
 {
 	DIR *d;
+	struct dirent entry, *pentry = NULL;
 	gint cur_req = 0;
-	struct dirent *ent;
-#if defined(__sun)
-	struct stat sb;
-#endif
+	gchar fpath[PATH_MAX];
 	FILE *in;
-	char filebuf[PATH_MAX];
+	struct stat st;
 
+	memset (&entry, 0, sizeof (entry));
 	d = opendir (name);
 
 	if (d != NULL) {
-		while ((ent = readdir (d))) {
-			rspamd_snprintf (filebuf, sizeof (filebuf), "%s%c%s",
-					name, G_DIR_SEPARATOR, ent->d_name);
-#if defined(__sun)
-			if (stat (filebuf, &sb)) continue;
-			if (S_ISREG (sb.st_mode)) {
-#else
-			if (ent->d_type == DT_REG || ent->d_type == DT_UNKNOWN) {
-#endif
-				if (access (filebuf, R_OK) != -1) {
-					in = fopen (filebuf, "r");
-					if (in == NULL) {
-						fprintf (stderr, "cannot open file %s\n", filebuf);
-						exit (EXIT_FAILURE);
-					}
-					rspamc_process_input (ev_base, cmd, in, filebuf, attrs);
-					cur_req++;
-					fclose (in);
-					if (cur_req >= max_requests) {
-						cur_req = 0;
-						/* Wait for completion */
-						event_base_loop (ev_base, 0);
-					}
+		while (readdir_r (d, &entry, &pentry) == 0) {
+			if (pentry == NULL) {
+				break;
+			}
+
+			if (pentry->d_name[0] == '.') {
+				continue;
+			}
+
+			rspamd_snprintf (fpath, sizeof (fpath), "%s%c%s",
+					name, G_DIR_SEPARATOR, pentry->d_name);
+
+			if (lstat (fpath, &st) == -1) {
+				rspamd_fprintf (stderr, "cannot stat file %s: %s\n",
+						fpath, strerror (errno));
+				continue;
+			}
+
+			if (S_ISDIR (st.st_mode)) {
+				rspamc_process_dir (ev_base, cmd, fpath, attrs);
+				continue;
+			}
+			else if (S_ISREG (st.st_mode)) {
+				in = fopen (fpath, "r");
+				if (in == NULL) {
+					rspamd_fprintf (stderr, "cannot open file %s: %s\n",
+							fpath, strerror (errno));
+					continue;
+				}
+
+				rspamc_process_input (ev_base, cmd, in, fpath, attrs);
+				cur_req++;
+				fclose (in);
+
+				if (cur_req >= max_requests) {
+					cur_req = 0;
+					/* Wait for completion */
+					event_base_loop (ev_base, 0);
 				}
 			}
 		}
 	}
 	else {
-		fprintf (stderr, "cannot open directory %s\n", name);
+		fprintf (stderr, "cannot open directory %s: %s\n", name, strerror (errno));
 		exit (EXIT_FAILURE);
 	}
 

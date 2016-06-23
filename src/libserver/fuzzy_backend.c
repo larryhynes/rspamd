@@ -32,7 +32,6 @@ struct rspamd_fuzzy_backend {
 
 static const gdouble sql_sleep_time = 0.1;
 static const guint max_retries = 10;
-static const guint32 flags_mask = (1U << 31);
 
 #define msg_err_fuzzy_backend(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
         backend->pool->tag.tagname, backend->pool->tag.uid, \
@@ -135,14 +134,14 @@ static struct rspamd_fuzzy_stmts {
 	{
 		.idx = RSPAMD_FUZZY_BACKEND_INSERT,
 		.sql = "INSERT INTO digests(flag, digest, value, time) VALUES"
-				"(?1, ?2, ?3, ?4);",
-		.args = "SDII",
+				"(?1, ?2, ?3, strftime('%s','now'));",
+		.args = "SDI",
 		.stmt = NULL,
 		.result = SQLITE_DONE
 	},
 	{
 		.idx = RSPAMD_FUZZY_BACKEND_UPDATE,
-		.sql = "UPDATE digests SET value = value + ?1 WHERE "
+		.sql = "UPDATE digests SET value = value + ?1, time = strftime('%s','now') WHERE "
 				"digest==?2;",
 		.args = "ID",
 		.stmt = NULL,
@@ -150,7 +149,7 @@ static struct rspamd_fuzzy_stmts {
 	},
 	{
 		.idx = RSPAMD_FUZZY_BACKEND_UPDATE_FLAG,
-		.sql = "UPDATE digests SET value = ?1, flag = ?2 WHERE "
+		.sql = "UPDATE digests SET value = ?1, flag = ?2, time = strftime('%s','now') WHERE "
 				"digest==?3;",
 		.args = "IID",
 		.stmt = NULL,
@@ -527,10 +526,6 @@ rspamd_fuzzy_backend_check (struct rspamd_fuzzy_backend *backend,
 			rep.prob = 1.0;
 			rep.flag = sqlite3_column_int (
 					prepared_stmts[RSPAMD_FUZZY_BACKEND_CHECK].stmt, 2);
-
-			if (!(rep.flag & flags_mask) && rep.flag > 0) {
-				rep.flag = (1U << (rep.flag - 1)) | flags_mask;
-			}
 		}
 	}
 	else if (cmd->shingles_count > 0) {
@@ -614,10 +609,6 @@ rspamd_fuzzy_backend_check (struct rspamd_fuzzy_backend *backend,
 						rep.flag = sqlite3_column_int (
 								prepared_stmts[RSPAMD_FUZZY_BACKEND_GET_DIGEST_BY_ID].stmt,
 								3);
-
-						if (!(rep.flag & flags_mask) && rep.flag > 0) {
-							rep.flag = (1U << (rep.flag - 1)) | flags_mask;
-						}
 					}
 				}
 			}
@@ -662,19 +653,13 @@ rspamd_fuzzy_backend_prepare_update (struct rspamd_fuzzy_backend *backend,
 
 gboolean
 rspamd_fuzzy_backend_add (struct rspamd_fuzzy_backend *backend,
-		const struct rspamd_fuzzy_cmd *cmd,
-		time_t timestamp)
+		const struct rspamd_fuzzy_cmd *cmd)
 {
 	int rc, i;
 	gint64 id, flag;
 	const struct rspamd_fuzzy_shingle_cmd *shcmd;
 
 	if (backend == NULL) {
-		return FALSE;
-	}
-
-	if (cmd->flag > 31 || cmd->flag == 0) {
-		msg_err_fuzzy_backend ("flag more than 31 is no longer supported");
 		return FALSE;
 	}
 
@@ -689,7 +674,7 @@ rspamd_fuzzy_backend_add (struct rspamd_fuzzy_backend *backend,
 				2);
 		rspamd_fuzzy_backend_cleanup_stmt (backend, RSPAMD_FUZZY_BACKEND_CHECK);
 
-		if (flag & (1U << (cmd->flag - 1))) {
+		if (flag == cmd->flag) {
 			/* We need to increase weight */
 			rc = rspamd_fuzzy_backend_run_stmt (backend, TRUE,
 					RSPAMD_FUZZY_BACKEND_UPDATE,
@@ -704,26 +689,11 @@ rspamd_fuzzy_backend_add (struct rspamd_fuzzy_backend *backend,
 		}
 		else {
 			/* We need to relearn actually */
-			if (flag & flags_mask) {
-				/* This is already new format */
-				flag |= (1U << (cmd->flag - 1));
-			}
-			else {
-				/* Convert to the new format */
-				if (flag > 31 || flag == 0) {
-					msg_warn_fuzzy_backend ("storage had flag more than 31, remove "
-							"it");
-					flag = cmd->flag | flags_mask;
-				}
-				else {
-					flag = (1U << (flag - 1)) | (1U << (cmd->flag - 1)) | flags_mask;
-				}
-			}
 
 			rc = rspamd_fuzzy_backend_run_stmt (backend, TRUE,
 					RSPAMD_FUZZY_BACKEND_UPDATE_FLAG,
 					(gint64) cmd->value,
-					(gint64) flag,
+					(gint64) cmd->flag,
 					cmd->digest);
 
 			if (rc != SQLITE_OK) {
@@ -738,10 +708,9 @@ rspamd_fuzzy_backend_add (struct rspamd_fuzzy_backend *backend,
 		rspamd_fuzzy_backend_cleanup_stmt (backend, RSPAMD_FUZZY_BACKEND_CHECK);
 		rc = rspamd_fuzzy_backend_run_stmt (backend, FALSE,
 				RSPAMD_FUZZY_BACKEND_INSERT,
-				(gint) (1U << (cmd->flag - 1)),
+				(gint) cmd->flag,
 				cmd->digest,
-				(gint64) cmd->value,
-				(gint64) timestamp);
+				(gint64) cmd->value);
 
 		if (rc == SQLITE_OK) {
 			if (cmd->shingles_count > 0) {
@@ -849,36 +818,14 @@ rspamd_fuzzy_backend_del (struct rspamd_fuzzy_backend *backend,
 				2);
 		rspamd_fuzzy_backend_cleanup_stmt (backend, RSPAMD_FUZZY_BACKEND_CHECK);
 
-		if (!(flag & flags_mask)) {
-			flag = (1U << (flag - 1)) | flags_mask;
-		}
-
-		if (flag & (1U << (cmd->flag - 1))) {
-			flag &= ~(1U << (cmd->flag - 1));
-
-			if (flag == 0) {
-				/* It is the last flag, so delete hash completely */
-				rc = rspamd_fuzzy_backend_run_stmt (backend, TRUE,
-							RSPAMD_FUZZY_BACKEND_DELETE,
-							cmd->digest);
-			}
-			else {
-				/* We need to delete specific flag */
-				rc = rspamd_fuzzy_backend_run_stmt (backend, TRUE,
-						RSPAMD_FUZZY_BACKEND_UPDATE_FLAG,
-						(gint64) cmd->value,
-						(gint64) flag,
-						cmd->digest);
-				if (rc != SQLITE_OK) {
-					msg_warn_fuzzy_backend ("cannot update hash to %d -> "
-							"%*xs: %s", (gint) cmd->flag,
-							(gint) sizeof (cmd->digest), cmd->digest,
-							sqlite3_errmsg (backend->db));
-				}
-			}
-		}
-		else {
-			/* The hash has a wrong flag, ignoring */
+		rc = rspamd_fuzzy_backend_run_stmt (backend, TRUE,
+				RSPAMD_FUZZY_BACKEND_DELETE,
+				cmd->digest);
+		if (rc != SQLITE_OK) {
+			msg_warn_fuzzy_backend ("cannot update hash to %d -> "
+					"%*xs: %s", (gint) cmd->flag,
+					(gint) sizeof (cmd->digest), cmd->digest,
+					sqlite3_errmsg (backend->db));
 		}
 	}
 	else {
