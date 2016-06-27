@@ -15,6 +15,7 @@
 #include "regexp.h"
 #include "libserver/re_cache.h"
 #include "ref.h"
+#include "libutil/radix.h"
 
 #define DEFAULT_BIND_PORT 11333
 #define DEFAULT_CONTROL_PORT 11334
@@ -305,7 +306,7 @@ struct rspamd_config {
 	gchar *log_file;                                /**< path to logfile in case of file logging			*/
 	gboolean log_buffered;                          /**< whether logging is buffered						*/
 	guint32 log_buf_size;                           /**< length of log buffer								*/
-	gchar *debug_ip_map;                            /**< turn on debugging for specified ip addresses       */
+	const ucl_object_t *debug_ip_map;               /**< turn on debugging for specified ip addresses       */
 	gboolean log_urls;                              /**< whether we should log URLs                         */
 	GList *debug_symbols;                           /**< symbols to debug									*/
 	GHashTable *debug_modules;                      /**< logging modules to debug							*/
@@ -453,12 +454,21 @@ const ucl_object_t * rspamd_config_get_module_opt (struct rspamd_config *cfg,
  */
 gchar rspamd_config_parse_flag (const gchar *str, guint len);
 
+enum rspamd_post_load_options {
+	RSPAMD_CONFIG_INIT_URL = 1 << 0,
+	RSPAMD_CONFIG_INIT_LIBS = 1 << 1,
+	RSPAMD_CONFIG_INIT_SYMCACHE = 1 << 2,
+	RSPAMD_CONFIG_INIT_VALIDATE = 1 << 3
+};
+
+#define RSPAMD_CONFIG_LOAD_ALL (RSPAMD_CONFIG_INIT_URL|RSPAMD_CONFIG_INIT_LIBS|RSPAMD_CONFIG_INIT_SYMCACHE|RSPAMD_CONFIG_INIT_VALIDATE)
+
 /**
  * Do post load actions for config
  * @param cfg config file
  */
 gboolean rspamd_config_post_load (struct rspamd_config *cfg,
-		gboolean validate_cache);
+		enum rspamd_post_load_options opts);
 
 /**
  * Calculate checksum for config file
@@ -596,6 +606,20 @@ gboolean rspamd_config_set_action_score (struct rspamd_config *cfg,
  */
 gboolean rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 		const gchar *module_name);
+
+/**
+ * Parse radix tree or radix map from ucl object
+ * @param cfg configuration object
+ * @param obj ucl object with parameter
+ * @param target target radix tree
+ * @param err error pointer
+ * @return
+ */
+gboolean rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
+		const ucl_object_t *obj,
+		const gchar *description,
+		radix_compressed_t **target,
+		GError **err);
 
 #define msg_err_config(...) rspamd_default_log_function (G_LOG_LEVEL_CRITICAL, \
         cfg->cfg_pool->tag.tagname, cfg->checksum, \

@@ -43,6 +43,7 @@ static gchar *sort = NULL;
 static gchar **http_headers = NULL;
 static gint weight = 0;
 static gint flag = 0;
+static gchar *fuzzy_symbol = NULL;
 static gint max_requests = 8;
 static gdouble timeout = 10.0;
 static gboolean pass_all;
@@ -133,6 +134,8 @@ static GOptionEntry entries[] =
 		"Sort output in a specific order (name, weight, time)", NULL},
 	{ "empty", 'E', 0, G_OPTION_ARG_NONE, &empty_input,
 	   "Allow empty input instead of reading from stdin", NULL },
+	{ "fuzzy-symbol", 'S', 0, G_OPTION_ARG_STRING, &fuzzy_symbol,
+	   "Learn the specified fuzzy symbol", NULL },
 	{ NULL, 0, 0, G_OPTION_ARG_NONE, NULL, NULL, NULL }
 };
 
@@ -467,6 +470,9 @@ add_options (GQueue *opts)
 		numbuf = g_string_sized_new (8);
 		rspamd_printf_gstring (numbuf, "%d", weight);
 		ADD_CLIENT_HEADER (opts, "Weight", numbuf->str);
+	}
+	if (fuzzy_symbol != NULL) {
+		ADD_CLIENT_HEADER (opts, "Symbol", fuzzy_symbol);
 	}
 	if (flag != 0) {
 		numbuf = g_string_sized_new (8);
@@ -904,10 +910,23 @@ rspamc_stat_output (FILE *out, ucl_object_t *obj)
 	rspamd_printf_gstring (out_str, "Oversized chunks: %L\n",
 		ucl_object_toint (ucl_object_lookup (obj, "chunks_oversized")));
 	/* Fuzzy */
-	rspamd_printf_gstring (out_str, "Fuzzy hashes stored: %L\n",
-		ucl_object_toint (ucl_object_lookup (obj, "fuzzy_stored")));
-	rspamd_printf_gstring (out_str, "Fuzzy hashes expired: %L\n",
-		ucl_object_toint (ucl_object_lookup (obj, "fuzzy_expired")));
+
+	st = ucl_object_lookup (obj, "fuzzy_hashes");
+	if (st) {
+		ucl_object_iter_t it = NULL;
+		const ucl_object_t *cur;
+		gint64 stored = 0;
+
+		while ((cur = ucl_iterate_object (st, &it, true)) != NULL) {
+			rspamd_printf_gstring (out_str, "Fuzzy hashes in storage \"%s\": %L\n",
+					ucl_object_key (cur),
+					ucl_object_toint (cur));
+			stored += ucl_object_toint (cur);
+		}
+
+		rspamd_printf_gstring (out_str, "Fuzzy hashes stored: %L\n",
+				stored);
+	}
 
 	st = ucl_object_lookup (obj, "fuzzy_checked");
 	if (st != NULL && ucl_object_type (st) == UCL_ARRAY) {

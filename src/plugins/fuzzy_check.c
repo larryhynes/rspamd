@@ -113,6 +113,7 @@ struct fuzzy_client_session {
 	GPtrArray *commands;
 	struct rspamd_task *task;
 	struct upstream *server;
+	rspamd_inet_addr_t *addr;
 	struct fuzzy_rule *rule;
 	struct event ev;
 	struct event timev;
@@ -128,6 +129,7 @@ struct fuzzy_learn_session {
 	GError **err;
 	struct rspamd_http_connection_entry *http_entry;
 	struct upstream *server;
+	rspamd_inet_addr_t *addr;
 	struct fuzzy_rule *rule;
 	struct rspamd_task *task;
 	struct event ev;
@@ -826,7 +828,6 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 	const ucl_object_t *value, *cur, *elt;
 	ucl_object_iter_t it;
 	gint res = TRUE, cb_id, nrules = 0;
-	const gchar *str;
 
 	if (!rspamd_config_is_module_enabled (cfg, "fuzzy_check")) {
 		return TRUE;
@@ -893,21 +894,8 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "fuzzy_check",
 		"whitelist")) != NULL) {
-		fuzzy_module_ctx->whitelist = radix_create_compressed ();
-		ucl_obj_tostring (value);
-
-		str = ucl_obj_tostring (value);
-
-		if (str && !rspamd_map_is_map (str)) {
-			radix_add_generic_iplist (str,
-					&fuzzy_module_ctx->whitelist);
-		}
-		else {
-			rspamd_map_add_from_ucl (cfg, value,
-					"Fuzzy whitelist", rspamd_radix_read, rspamd_radix_fin,
-					(void **)&fuzzy_module_ctx->whitelist);
-
-		}
+		rspamd_config_radix_from_ucl (cfg, value, "Fuzzy whitelist",
+				&fuzzy_module_ctx->whitelist, NULL);
 	}
 	else {
 		fuzzy_module_ctx->whitelist = NULL;
@@ -1110,6 +1098,48 @@ fuzzy_cmd_from_task_meta (struct fuzzy_rule *rule,
 	}
 
 	rspamd_cryptobox_hash_final (&st, cmd->digest);
+
+	io = rspamd_mempool_alloc (pool, sizeof (*io));
+	io->flags = 0;
+	io->tag = cmd->tag;
+	io->cmd = cmd;
+
+	if (rule->peer_key) {
+		fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *)cmd, sizeof (*cmd));
+		io->io.iov_base = enccmd;
+		io->io.iov_len = sizeof (*enccmd);
+	}
+	else {
+		io->io.iov_base = cmd;
+		io->io.iov_len = sizeof (*cmd);
+	}
+
+	return io;
+}
+
+static struct fuzzy_cmd_io *
+fuzzy_cmd_stat (struct fuzzy_rule *rule,
+		int c,
+		gint flag,
+		guint32 weight,
+		rspamd_mempool_t *pool)
+{
+	struct rspamd_fuzzy_cmd *cmd;
+	struct rspamd_fuzzy_encrypted_cmd *enccmd;
+	struct fuzzy_cmd_io *io;
+
+	if (rule->peer_key) {
+		enccmd = rspamd_mempool_alloc0 (pool, sizeof (*enccmd));
+		cmd = &enccmd->cmd;
+	}
+	else {
+		cmd = rspamd_mempool_alloc0 (pool, sizeof (*cmd));
+	}
+
+	cmd->cmd = c;
+	cmd->version = RSPAMD_FUZZY_PLUGIN_VERSION;
+	cmd->shingles_count = 0;
+	cmd->tag = ottery_rand_uint32 ();
 
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->flags = 0;
@@ -1540,7 +1570,29 @@ fuzzy_check_try_read (struct fuzzy_client_session *session)
 		while ((rep = fuzzy_process_reply (&p, &r,
 				session->commands, session->rule, &cmd)) != NULL) {
 			if (rep->prob > 0.5) {
-				fuzzy_insert_result (session, rep, cmd, rep->flag);
+				if (cmd->cmd == FUZZY_CHECK) {
+					fuzzy_insert_result (session, rep, cmd, rep->flag);
+				}
+				else if (cmd->cmd == FUZZY_STAT) {
+					/* Just set pool variable to extract it in further */
+					struct rspamd_fuzzy_stat_entry *pval;
+					GList *res;
+
+					pval = rspamd_mempool_alloc (task->task_pool, sizeof (*pval));
+					pval->fuzzy_cnt = rep->flag;
+					pval->name = session->rule->name;
+
+					res = rspamd_mempool_get_variable (task->task_pool, "fuzzy_stat");
+
+					if (res == NULL) {
+						res = g_list_append (NULL, pval);
+						rspamd_mempool_set_variable (task->task_pool, "fuzzy_stat",
+								res, (rspamd_mempool_destruct_t)g_list_free);
+					}
+					else {
+						res = g_list_append (res, pval);
+					}
+				}
 			}
 			else if (rep->value == 403) {
 				msg_info_task (
@@ -1644,8 +1696,9 @@ fuzzy_check_io_callback (gint fd, short what, void *arg)
 	}
 	else if (ret == return_error) {
 		/* Error state */
-		msg_err_task ("got error on IO with server %s, on %s, %d, %s",
+		msg_err_task ("got error on IO with server %s(%s), on %s, %d, %s",
 			rspamd_upstream_name (session->server),
+			rspamd_inet_address_to_string (session->addr),
 			session->state == 1 ? "read" : "write",
 			errno,
 			strerror (errno));
@@ -1684,8 +1737,9 @@ fuzzy_check_timer_callback (gint fd, short what, void *arg)
 	}
 
 	if (session->retransmits >= fuzzy_module_ctx->retransmits) {
-		msg_err_task ("got IO timeout with server %s, after %d retransmits",
+		msg_err_task ("got IO timeout with server %s(%s), after %d retransmits",
 				rspamd_upstream_name (session->server),
+				rspamd_inet_address_to_string (session->addr),
 				session->retransmits);
 		rspamd_upstream_fail (session->server);
 		rspamd_session_remove_event (session->task->s, fuzzy_io_fin, session);
@@ -1785,7 +1839,7 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 					if (*(session->err) == NULL) {
 						g_set_error (session->err,
 							g_quark_from_static_string ("fuzzy check"),
-							EINVAL, "process fuzzy error");
+							rep->value, "process fuzzy error");
 					}
 					ret = return_finished;
 				}
@@ -1832,8 +1886,10 @@ fuzzy_controller_io_callback (gint fd, short what, void *arg)
 		return;
 	}
 	else if (ret == return_error) {
-		msg_err_task ("got error in IO with server %s, %d, %s",
-				rspamd_upstream_name (session->server), errno, strerror (errno));
+		msg_err_task ("got error in IO with server %s(%s), %d, %s",
+				rspamd_upstream_name (session->server),
+				rspamd_inet_address_to_string (session->addr),
+				errno, strerror (errno));
 		rspamd_upstream_fail (session->server);
 	}
 
@@ -1895,8 +1951,9 @@ fuzzy_controller_timer_callback (gint fd, short what, void *arg)
 		rspamd_upstream_fail (session->server);
 		rspamd_controller_send_error (session->http_entry,
 				500, "IO timeout with fuzzy storage");
-		msg_err_task ("got IO timeout with server %s, after %d retransmits",
+		msg_err_task ("got IO timeout with server %s(%s), after %d retransmits",
 				rspamd_upstream_name (session->server),
+				rspamd_inet_address_to_string (session->addr),
 				session->retransmits);
 
 		if (*session->saved > 0 ) {
@@ -1942,6 +1999,15 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 	GPtrArray *res;
 
 	res = g_ptr_array_new ();
+
+	if (c == FUZZY_STAT) {
+		io = fuzzy_cmd_stat (rule, c, flag, value, task->task_pool);
+		if (io) {
+			g_ptr_array_add (res, io);
+		}
+
+		goto end;
+	}
 
 	for (i = 0; i < task->text_parts->len; i ++) {
 		part = g_ptr_array_index (task->text_parts, i);
@@ -2038,7 +2104,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 		g_ptr_array_add (res, io);
 	}
 #endif
-
+end:
 	if (res->len == 0) {
 		g_ptr_array_free (res, FALSE);
 		return NULL;
@@ -2055,16 +2121,18 @@ register_fuzzy_client_call (struct rspamd_task *task,
 {
 	struct fuzzy_client_session *session;
 	struct upstream *selected;
+	rspamd_inet_addr_t *addr;
 	gint sock;
 
 	/* Get upstream */
 	selected = rspamd_upstream_get (rule->servers, RSPAMD_UPSTREAM_ROUND_ROBIN,
 			NULL, 0);
 	if (selected) {
-		if ((sock = rspamd_inet_address_connect (rspamd_upstream_addr (selected),
-				SOCK_DGRAM, TRUE)) == -1) {
-			msg_warn_task ("cannot connect to %s, %d, %s",
+		addr = rspamd_upstream_addr (selected);
+		if ((sock = rspamd_inet_address_connect (addr, SOCK_DGRAM, TRUE)) == -1) {
+			msg_warn_task ("cannot connect to %s(%s), %d, %s",
 				rspamd_upstream_name (selected),
+				rspamd_inet_address_to_string (addr),
 				errno,
 				strerror (errno));
 			rspamd_upstream_fail (selected);
@@ -2081,6 +2149,7 @@ register_fuzzy_client_call (struct rspamd_task *task,
 			session->fd = sock;
 			session->server = selected;
 			session->rule = rule;
+			session->addr = addr;
 
 			event_set (&session->ev, sock, EV_WRITE, fuzzy_check_io_callback,
 					session);
@@ -2130,6 +2199,24 @@ fuzzy_symbol_callback (struct rspamd_task *task, void *unused)
 	}
 }
 
+void
+fuzzy_stat_command (struct rspamd_task *task)
+{
+	struct fuzzy_rule *rule;
+	GList *cur;
+	GPtrArray *commands;
+
+	cur = fuzzy_module_ctx->fuzzy_rules;
+	while (cur) {
+		rule = cur->data;
+		commands = fuzzy_generate_commands (task, rule, FUZZY_STAT, 0, 0);
+		if (commands != NULL) {
+			register_fuzzy_client_call (task, rule, commands);
+		}
+		cur = g_list_next (cur);
+	}
+}
+
 static inline gboolean
 register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 	struct fuzzy_rule *rule,
@@ -2140,6 +2227,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 {
 	struct fuzzy_learn_session *s;
 	struct upstream *selected;
+	rspamd_inet_addr_t *addr;
 	struct rspamd_controller_session *session = entry->ud;
 	gint sock;
 	gboolean ret = FALSE;
@@ -2149,7 +2237,9 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 	while ((selected = rspamd_upstream_get (rule->servers,
 			RSPAMD_UPSTREAM_SEQUENTIAL, NULL, 0))) {
 		/* Create UDP socket */
-		if ((sock = rspamd_inet_address_connect (rspamd_upstream_addr (selected),
+		addr = rspamd_upstream_addr (selected);
+
+		if ((sock = rspamd_inet_address_connect (addr,
 				SOCK_DGRAM, TRUE)) == -1) {
 			rspamd_upstream_fail (selected);
 		}
@@ -2160,6 +2250,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 
 			msec_to_tv (fuzzy_module_ctx->io_timeout, &s->tv);
 			s->task = task;
+			s->addr = addr;
 			s->commands = commands;
 			s->http_entry = entry;
 			s->server = selected;
@@ -2321,7 +2412,7 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 	return;
 }
 
-static gboolean
+static int
 fuzzy_controller_handler (struct rspamd_http_connection_entry *conn_ent,
 	struct rspamd_http_message *msg, struct module_ctx *ctx, gint cmd)
 {
@@ -2337,13 +2428,51 @@ fuzzy_controller_handler (struct rspamd_http_connection_entry *conn_ent,
 			msg_info ("error converting numeric argument %T", arg);
 		}
 	}
+
 	arg = rspamd_http_message_find_header (msg, "Flag");
 	if (arg) {
 		errno = 0;
+
 		if (!rspamd_strtol (arg->begin, arg->len, &flag)) {
 			msg_info ("error converting numeric argument %T", arg);
 			flag = 0;
 		}
+	}
+	else {
+		flag = 0;
+		arg = rspamd_http_message_find_header (msg, "Symbol");
+
+		/* Search flag by symbol */
+		if (arg) {
+			struct fuzzy_rule *rule;
+			GList *cur;
+			GHashTableIter it;
+			gpointer k, v;
+			struct fuzzy_mapping *map;
+
+			for (cur = fuzzy_module_ctx->fuzzy_rules; cur != NULL && flag == 0;
+					cur = g_list_next (cur)) {
+				rule = cur->data;
+
+				g_hash_table_iter_init (&it, rule->mappings);
+
+				while (g_hash_table_iter_next (&it, &k, &v)) {
+					map = v;
+
+					if (strlen (map->symbol) == arg->len &&
+							rspamd_lc_cmp (map->symbol, arg->begin, arg->len) == 0) {
+						flag = map->fuzzy_flag;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (flag == 0) {
+		msg_err ("no flag defined to learn fuzzy");
+		rspamd_controller_send_error (conn_ent, 404, "Unknown or missing flag");
+		return 0;
 	}
 
 	fuzzy_process_handler (conn_ent, msg, cmd, value, flag,

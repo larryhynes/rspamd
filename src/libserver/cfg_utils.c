@@ -611,7 +611,8 @@ rspamd_config_parse_log_format (struct rspamd_config *cfg)
  * Perform post load actions
  */
 gboolean
-rspamd_config_post_load (struct rspamd_config *cfg, gboolean validate_cache)
+rspamd_config_post_load (struct rspamd_config *cfg,
+		enum rspamd_post_load_options opts)
 {
 #ifdef HAVE_CLOCK_GETTIME
 	struct timespec ts;
@@ -651,46 +652,48 @@ rspamd_config_post_load (struct rspamd_config *cfg, gboolean validate_cache)
 		def_metric->actions[METRIC_ACTION_REJECT].score = DEFAULT_SCORE;
 	}
 
-	if (cfg->tld_file == NULL) {
-		/* Try to guess tld file */
-		GString *fpath = g_string_new (NULL);
+	if (opts & RSPAMD_CONFIG_INIT_URL) {
+		if (cfg->tld_file == NULL) {
+			/* Try to guess tld file */
+			GString *fpath = g_string_new (NULL);
 
-		rspamd_printf_gstring (fpath, "%s%c%s", RSPAMD_PLUGINSDIR,
-				G_DIR_SEPARATOR, "effective_tld_names.dat");
+			rspamd_printf_gstring (fpath, "%s%c%s", RSPAMD_PLUGINSDIR,
+					G_DIR_SEPARATOR, "effective_tld_names.dat");
 
-		if (access (fpath->str, R_OK) != -1) {
-			msg_debug_config ("url_tld option is not specified but %s is available,"
-					" therefore this file is assumed as TLD file for URL"
-					" extraction", fpath->str);
-			cfg->tld_file = rspamd_mempool_strdup (cfg->cfg_pool, fpath->str);
-		}
-		else {
-			if (validate_cache) {
-				msg_err_config ("no url_tld option has been specified");
-				ret = FALSE;
-			}
-		}
-
-		g_string_free (fpath, TRUE);
-	}
-	else {
-		if (access (cfg->tld_file, R_OK) == -1) {
-			if (validate_cache) {
-				ret = FALSE;
-				msg_err_config ("cannot access tld file %s: %s", cfg->tld_file,
-						strerror (errno));
+			if (access (fpath->str, R_OK) != -1) {
+				msg_debug_config ("url_tld option is not specified but %s is available,"
+						" therefore this file is assumed as TLD file for URL"
+						" extraction", fpath->str);
+				cfg->tld_file = rspamd_mempool_strdup (cfg->cfg_pool, fpath->str);
 			}
 			else {
-				msg_debug_config ("cannot access tld file %s: %s", cfg->tld_file,
-						strerror (errno));
-				cfg->tld_file = NULL;
+				if (opts & RSPAMD_CONFIG_INIT_VALIDATE) {
+					msg_err_config ("no url_tld option has been specified");
+					ret = FALSE;
+				}
+			}
+
+			g_string_free (fpath, TRUE);
+		}
+		else {
+			if (access (cfg->tld_file, R_OK) == -1) {
+				if (opts & RSPAMD_CONFIG_INIT_VALIDATE) {
+					ret = FALSE;
+					msg_err_config ("cannot access tld file %s: %s", cfg->tld_file,
+							strerror (errno));
+				}
+				else {
+					msg_debug_config ("cannot access tld file %s: %s", cfg->tld_file,
+							strerror (errno));
+					cfg->tld_file = NULL;
+				}
 			}
 		}
+
+		rspamd_url_init (cfg->tld_file);
 	}
 
 	init_dynamic_config (cfg);
-	rspamd_url_init (cfg->tld_file);
-
 	/* Insert classifiers symbols */
 	rspamd_config_insert_classify_symbols (cfg);
 
@@ -699,14 +702,18 @@ rspamd_config_post_load (struct rspamd_config *cfg, gboolean validate_cache)
 		msg_err_config ("cannot parse log format, task logging will not be available");
 	}
 
-	/* Init config cache */
-	rspamd_symbols_cache_init (cfg->cache);
+	if (opts & RSPAMD_CONFIG_INIT_SYMCACHE) {
+		/* Init config cache */
+		rspamd_symbols_cache_init (cfg->cache);
 
-	/* Init re cache */
-	rspamd_re_cache_init (cfg->re_cache, cfg);
+		/* Init re cache */
+		rspamd_re_cache_init (cfg->re_cache, cfg);
+	}
 
-	/* Config other libraries */
-	rspamd_config_libs (cfg->libs_ctx, cfg);
+	if (opts & RSPAMD_CONFIG_INIT_LIBS) {
+		/* Config other libraries */
+		rspamd_config_libs (cfg->libs_ctx, cfg);
+	}
 
 	/* Execute post load scripts */
 	LL_FOREACH (cfg->on_load, sc) {
@@ -725,7 +732,7 @@ rspamd_config_post_load (struct rspamd_config *cfg, gboolean validate_cache)
 	}
 
 	/* Validate cache */
-	if (validate_cache) {
+	if (opts & RSPAMD_CONFIG_INIT_VALIDATE) {
 		return rspamd_symbols_cache_validate (cfg->cache, cfg, FALSE) && ret;
 	}
 
@@ -1630,6 +1637,87 @@ rspamd_config_set_action_score (struct rspamd_config *cfg,
 
 			act->score = score;
 			act->priority = priority;
+		}
+	}
+
+	return TRUE;
+}
+
+
+gboolean
+rspamd_config_radix_from_ucl (struct rspamd_config *cfg,
+		const ucl_object_t *obj,
+		const gchar *description,
+		radix_compressed_t **target,
+		GError **err)
+{
+	ucl_type_t type;
+	ucl_object_iter_t it = NULL;
+	const ucl_object_t *cur, *cur_elt;
+	const gchar *str;
+
+	LL_FOREACH (obj, cur_elt) {
+		type = ucl_object_type (cur_elt);
+
+		switch (type) {
+		case UCL_STRING:
+			/* Either map or a list of IPs */
+			str = ucl_object_tostring (cur_elt);
+
+			if (rspamd_map_is_map (str)) {
+				if (rspamd_map_add_from_ucl (cfg, cur_elt,
+						description, rspamd_radix_read, rspamd_radix_fin,
+						(void **)target) == NULL) {
+					g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+							EINVAL, "bad map definition %s for %s", str,
+							ucl_object_key (obj));
+					return FALSE;
+				}
+			}
+			else {
+				/* Just a list */
+				if (!radix_add_generic_iplist (str, target, TRUE)) {
+					g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+							EINVAL, "bad map definition %s for %s", str,
+							ucl_object_key (obj));
+					return FALSE;
+				}
+			}
+			break;
+		case UCL_OBJECT:
+			/* Should be a map description */
+			if (rspamd_map_add_from_ucl (cfg, cur_elt,
+					description, rspamd_radix_read, rspamd_radix_fin,
+					(void **)target) == NULL) {
+				g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+						EINVAL, "bad map object for %s", ucl_object_key (obj));
+				return FALSE;
+			}
+			break;
+		case UCL_ARRAY:
+			/* List of IP addresses */
+			while ((cur = ucl_iterate_object (cur_elt, &it, true)) != NULL) {
+				str = ucl_object_tostring (cur);
+
+				if (str == NULL || !radix_add_generic_iplist (str, target, TRUE)) {
+					g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+							EINVAL, "bad map element %s for %s", str,
+							ucl_object_key (obj));
+
+					if (*target) {
+						radix_destroy_compressed (*target);
+					}
+
+					return FALSE;
+				}
+			}
+			break;
+		default:
+			g_set_error (err, g_quark_from_static_string ("rspamd-config"),
+					EINVAL, "bad map type %s for %s",
+					ucl_object_type_to_string (type),
+					ucl_object_key (obj));
+			return FALSE;
 		}
 	}
 

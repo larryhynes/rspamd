@@ -24,6 +24,7 @@
 #include "libserver/worker_util.h"
 #include "cryptobox.h"
 #include "ottery.h"
+#include "fuzzy_storage.h"
 #include "libutil/rrd.h"
 #include "unix-std.h"
 #include "utlist.h"
@@ -102,6 +103,8 @@ const struct timeval rrd_update_time = {
 };
 
 const guint64 rspamd_controller_ctx_magic = 0xf72697805e6941faULL;
+
+extern void fuzzy_stat_command (struct rspamd_task *task);
 
 gpointer init_controller_worker (struct rspamd_config *cfg);
 void start_controller_worker (struct rspamd_worker *worker);
@@ -1925,7 +1928,9 @@ rspamd_controller_stat_fin_task (void *ud)
 {
 	struct rspamd_stat_cbdata *cbdata = ud;
 	struct rspamd_http_connection_entry *conn_ent;
-	ucl_object_t *top;
+	ucl_object_t *top, *ar;
+	GList *fuzzy_elts, *cur;
+	struct rspamd_fuzzy_stat_entry *entry;
 
 	conn_ent = cbdata->conn_ent;
 	top = cbdata->top;
@@ -1935,6 +1940,23 @@ rspamd_controller_stat_fin_task (void *ud)
 
 	if (cbdata->stat) {
 		ucl_object_insert_key (top, cbdata->stat, "statfiles", 0, false);
+	}
+
+	fuzzy_elts = rspamd_mempool_get_variable (cbdata->task->task_pool, "fuzzy_stat");
+
+	if (fuzzy_elts) {
+		ar = ucl_object_typed_new (UCL_OBJECT);
+
+		for (cur = fuzzy_elts; cur != NULL; cur = g_list_next (cur)) {
+			entry = cur->data;
+
+			if (entry->name) {
+				ucl_object_insert_key (ar, ucl_object_fromint (entry->fuzzy_cnt),
+						entry->name, 0, true);
+			}
+		}
+
+		ucl_object_insert_key (top, ar, "fuzzy_hashes", 0, false);
 	}
 
 	rspamd_controller_send_ucl (conn_ent, top);
@@ -2063,6 +2085,8 @@ rspamd_controller_handle_stat_common (
 		session->ctx->srv->stat->control_connections_count = 0;
 		rspamd_mempool_stat_reset ();
 	}
+
+	fuzzy_stat_command (task);
 
 	/* Now write statistics for each statfile */
 	rspamd_stat_statistics (task, session->ctx->cfg, &cbdata->learned,
@@ -2565,8 +2589,6 @@ start_controller_worker (struct rspamd_worker *worker)
 	GHashTableIter iter;
 	gpointer key, value;
 	struct rspamd_keypair_cache *cache;
-	const ucl_object_t *cur;
-	ucl_object_iter_t it = NULL;
 	gpointer m;
 
 	ctx->ev_base = rspamd_prepare_worker (worker,
@@ -2582,44 +2604,9 @@ start_controller_worker (struct rspamd_worker *worker)
 			rspamd_strcase_equal);
 
 	if (ctx->secure_ip != NULL) {
-		if (ucl_object_type (ctx->secure_ip) == UCL_ARRAY) {
-
-			while ((cur = ucl_object_iterate (ctx->secure_ip, &it, true)) != NULL) {
-				/* Try map syntax */
-				if (ucl_object_type (cur) == UCL_STRING &&
-						!rspamd_map_is_map (ucl_object_tostring (cur))) {
-					if (!radix_add_generic_iplist (ucl_object_tostring (cur),
-							&ctx->secure_map)) {
-						msg_warn_ctx ("cannot load or parse ip list from '%s'",
-								ucl_object_tostring (cur));
-					}
-				}
-				else {
-					rspamd_map_add_from_ucl (worker->srv->cfg, cur,
-							"Allow webui access from the specified IP",
-							rspamd_radix_read, rspamd_radix_fin,
-							(void **)&ctx->secure_map);
-				}
-			}
-		}
-		else {
-			LL_FOREACH (ctx->secure_ip, cur) {
-				if (ucl_object_type (cur) == UCL_STRING &&
-						!rspamd_map_is_map (ucl_object_tostring (cur))) {
-					if (!radix_add_generic_iplist (ucl_object_tostring (cur),
-							&ctx->secure_map)) {
-						msg_warn_ctx ("cannot load or parse ip list from '%s'",
-								ucl_object_tostring (cur));
-					}
-				}
-				else {
-					rspamd_map_add_from_ucl (worker->srv->cfg, ctx->secure_ip,
-							"Allow webui access from the specified IP",
-							rspamd_radix_read, rspamd_radix_fin,
-							(void **)&ctx->secure_map);
-				}
-			}
-		}
+		rspamd_config_radix_from_ucl (ctx->cfg, ctx->secure_ip,
+				"Allow unauthenticated requests from these addresses",
+				&ctx->secure_map, NULL);
 	}
 
 	if (ctx->saved_stats_path == NULL) {

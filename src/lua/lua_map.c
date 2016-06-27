@@ -174,7 +174,8 @@ lua_config_radix_from_config (lua_State *L)
 			map->type = RSPAMD_LUA_MAP_RADIX;
 			map->data.radix = radix_create_compressed ();
 			map->flags |= RSPAMD_LUA_MAP_FLAG_EMBEDDED;
-			radix_add_generic_iplist (ucl_obj_tostring (obj), &map->data.radix);
+			radix_add_generic_iplist (ucl_obj_tostring (obj), &map->data.radix,
+					TRUE);
 			pmap = lua_newuserdata (L, sizeof (void *));
 			*pmap = map;
 			rspamd_lua_setclass (L, "rspamd{map}", -1);
@@ -547,7 +548,7 @@ lua_map_get_key (lua_State * L)
 				}
 			}
 		}
-		else {
+		else if (map->type == RSPAMD_LUA_MAP_HASH) {
 			/* key-value map */
 			key = lua_tostring (L, 2);
 
@@ -559,6 +560,11 @@ lua_map_get_key (lua_State * L)
 				lua_pushstring (L, value);
 				return 1;
 			}
+		}
+		else {
+			/* callback map or unknown type map */
+			lua_pushnil (L);
+			return 1;
 		}
 	}
 	else {

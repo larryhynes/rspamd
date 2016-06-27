@@ -68,7 +68,7 @@
 static gboolean load_rspamd_config (struct rspamd_main *rspamd_main,
 		struct rspamd_config *cfg,
 		gboolean init_modules,
-		gboolean validate);
+		enum rspamd_post_load_options opts);
 
 /* Control socket */
 static gint control_fd;
@@ -280,7 +280,7 @@ reread_config (struct rspamd_main *rspamd_main)
 	/* Save some variables */
 	tmp_cfg->cfg_name = cfg_file;
 
-	if (!load_rspamd_config (rspamd_main, tmp_cfg, FALSE, TRUE)) {
+	if (!load_rspamd_config (rspamd_main, tmp_cfg, FALSE, RSPAMD_CONFIG_INIT_VALIDATE)) {
 		rspamd_set_logger (rspamd_main->cfg, g_quark_try_string (
 				"main"), rspamd_main);
 		msg_err_main ("cannot parse new config file, revert to old one");
@@ -405,9 +405,13 @@ systemd_get_socket (struct rspamd_main *rspamd_main, gint number)
 				return NULL;
 			}
 			flags = fcntl (sock, F_GETFD);
+
 			if (flags != -1) {
 				(void)fcntl (sock, F_SETFD, flags | FD_CLOEXEC);
 			}
+
+			rspamd_socket_nonblocking (sock);
+
 			result = g_list_prepend (result, GINT_TO_POINTER (sock));
 		}
 		else if (num_passed <= number) {
@@ -749,7 +753,8 @@ reopen_log_handler (gpointer key, gpointer value, gpointer unused)
 
 static gboolean
 load_rspamd_config (struct rspamd_main *rspamd_main,
-		struct rspamd_config *cfg, gboolean init_modules, gboolean validate)
+		struct rspamd_config *cfg, gboolean init_modules,
+		enum rspamd_post_load_options opts)
 {
 	cfg->compiled_modules = modules;
 	cfg->compiled_workers = workers;
@@ -782,7 +787,7 @@ load_rspamd_config (struct rspamd_main *rspamd_main,
 	}
 
 	/* Do post-load actions */
-	rspamd_config_post_load (cfg, validate);
+	rspamd_config_post_load (cfg, opts);
 
 	return TRUE;
 }
@@ -1120,7 +1125,7 @@ main (gint argc, gchar **argv, gchar **env)
 	}
 
 	if (config_test || dump_cache) {
-		if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, FALSE, FALSE)) {
+		if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, FALSE, 0)) {
 			exit (EXIT_FAILURE);
 		}
 
@@ -1146,7 +1151,8 @@ main (gint argc, gchar **argv, gchar **env)
 	}
 
 	/* Load config */
-	if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, TRUE, TRUE)) {
+	if (!load_rspamd_config (rspamd_main, rspamd_main->cfg, TRUE,
+			RSPAMD_CONFIG_LOAD_ALL)) {
 		exit (EXIT_FAILURE);
 	}
 

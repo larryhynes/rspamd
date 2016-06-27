@@ -2010,25 +2010,26 @@ rspamd_init_libs (void)
 
 #ifdef HAVE_OPENSSL
 	ERR_load_crypto_strings ();
+	SSL_load_error_strings ();
 
 	OpenSSL_add_all_algorithms ();
 	OpenSSL_add_all_digests ();
 	OpenSSL_add_all_ciphers ();
 
-#if OPENSSL_VERSION_NUMBER >= 0x1000104fL
+#if OPENSSL_VERSION_NUMBER >= 0x1000104fL && !defined(LIBRESSL_VERSION_NUMBER)
 	ENGINE_load_builtin_engines ();
 
 	if ((ctx->crypto_ctx->cpu_config & CPUID_RDRAND) == 0) {
 		RAND_set_rand_engine (NULL);
 	}
 #endif
+
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
 	SSL_library_init ();
 #else
 	OPENSSL_init_ssl (0, NULL);
 #endif
-	SSL_library_init ();
-	SSL_load_error_strings ();
+
 	OPENSSL_config (NULL);
 
 	if (RAND_poll () == 0) {
@@ -2085,16 +2086,8 @@ rspamd_config_libs (struct rspamd_external_libs_ctx *ctx,
 
 	if (ctx != NULL) {
 		if (cfg->local_addrs) {
-			if (ucl_object_type (cfg->local_addrs) == UCL_STRING &&
-					!rspamd_map_is_map (ucl_object_tostring (cfg->local_addrs))) {
-				radix_add_generic_iplist (ucl_object_tostring (cfg->local_addrs),
-						(radix_compressed_t **)ctx->local_addrs);
-			}
-			else {
-				rspamd_map_add_from_ucl (cfg, cfg->local_addrs,
-					"Local addresses", rspamd_radix_read, rspamd_radix_fin,
-					(void **) ctx->local_addrs);
-			}
+			rspamd_config_radix_from_ucl (cfg, cfg->local_addrs, "Local addresses",
+					ctx->local_addrs, NULL);
 		}
 
 		if (cfg->ssl_ca_path) {
