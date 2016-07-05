@@ -344,16 +344,28 @@ local function multimap_callback(task, pre_filter)
     end
   end
   -- Filename rules
+  local function check_file(fn)
+    _.each(function(r)
+          match_filename(r, fn)
+        end,
+        _.filter(function(r)
+          return pre_filter == r['prefilter'] and r['type'] == 'filename'
+        end, rules))
+  end
+
   local parts = task:get_parts()
   for i,p in ipairs(parts) do
+    if p:is_archive() then
+      local fnames = p:get_archive():get_files()
+
+      for ii,fn in ipairs(fnames) do
+        check_file(fn)
+      end
+    end
+
     local fn = p:get_filename()
     if fn then
-      _.each(function(r)
-        match_filename(r, fn)
-      end,
-      _.filter(function(r)
-        return pre_filter == r['prefilter'] and r['type'] == 'filename'
-      end, rules))
+      check_file(fn)
     end
   end
   -- RBL rules

@@ -127,6 +127,7 @@ struct rspamd_fuzzy_storage_ctx {
 	GPtrArray *mirrors;
 	const ucl_object_t *update_map;
 	const ucl_object_t *masters_map;
+	GHashTable *master_flags;
 	guint keypair_cache_size;
 	struct event_base *ev_base;
 	gint peer_fd;
@@ -711,28 +712,30 @@ rspamd_fuzzy_process_command (struct fuzzy_session *session)
 	}
 
 reply:
-	result.tag = cmd->tag;
+	if (cmd) {
+		result.tag = cmd->tag;
 
-	memcpy (&session->reply.rep, &result, sizeof (result));
+		memcpy (&session->reply.rep, &result, sizeof (result));
 
-	rspamd_fuzzy_update_stats (session->ctx,
-			session->epoch,
-			result.prob > 0.5,
-			is_shingle,
-			session->key_stat,
-			ip_stat, cmd->cmd,
-			result.value);
+		rspamd_fuzzy_update_stats (session->ctx,
+				session->epoch,
+				result.prob > 0.5,
+				is_shingle,
+				session->key_stat,
+				ip_stat, cmd->cmd,
+				result.value);
 
-	if (encrypted) {
-		/* We need also to encrypt reply */
-		ottery_rand_bytes (session->reply.hdr.nonce,
-				sizeof (session->reply.hdr.nonce));
-		rspamd_cryptobox_encrypt_nm_inplace ((guchar *)&session->reply.rep,
-				sizeof (session->reply.rep),
-				session->reply.hdr.nonce,
-				session->nm,
-				session->reply.hdr.mac,
-				RSPAMD_CRYPTOBOX_MODE_25519);
+		if (encrypted) {
+			/* We need also to encrypt reply */
+			ottery_rand_bytes (session->reply.hdr.nonce,
+					sizeof (session->reply.hdr.nonce));
+			rspamd_cryptobox_encrypt_nm_inplace ((guchar *)&session->reply.rep,
+					sizeof (session->reply.rep),
+					session->reply.hdr.nonce,
+					session->nm,
+					session->reply.hdr.mac,
+					RSPAMD_CRYPTOBOX_MODE_25519);
+		}
 	}
 
 	rspamd_fuzzy_write_reply (session);
@@ -745,18 +748,6 @@ rspamd_fuzzy_command_valid (struct rspamd_fuzzy_cmd *cmd, gint r)
 	enum rspamd_fuzzy_epoch ret = RSPAMD_FUZZY_EPOCH_MAX;
 
 	switch (cmd->version) {
-	case 4:
-		if (cmd->shingles_count > 0) {
-			if (r == sizeof (struct rspamd_fuzzy_shingle_cmd)) {
-				ret = RSPAMD_FUZZY_EPOCH11;
-			}
-		}
-		else {
-			if (r == sizeof (*cmd)) {
-				ret = RSPAMD_FUZZY_EPOCH11;
-			}
-		}
-		break;
 	case 3:
 		if (cmd->shingles_count > 0) {
 			if (r == sizeof (struct rspamd_fuzzy_shingle_cmd)) {
@@ -937,7 +928,7 @@ rspamd_fuzzy_mirror_process_update (struct fuzzy_master_update_session *session,
 	gchar *src = NULL, *psrc;
 	gsize remain;
 	gint32 revision, our_rev;
-	guint32 len, cnt = 0;
+	guint32 len = 0, cnt = 0;
 	struct fuzzy_peer_cmd cmd, *pcmd;
 	enum {
 		read_len = 0,
@@ -945,6 +936,7 @@ rspamd_fuzzy_mirror_process_update (struct fuzzy_master_update_session *session,
 		finish_processing
 	} state = read_len;
 	GList *updates = NULL, *cur;
+	gpointer flag_ptr;
 
 	if (!rspamd_http_message_get_body (msg, NULL) || !msg->url
 			|| msg->url->len == 0) {
@@ -1070,6 +1062,22 @@ rspamd_fuzzy_mirror_process_update (struct fuzzy_master_update_session *session,
 
 	/* Insert elements to the updates from head */
 	for (cur = updates; cur != NULL; cur = g_list_next (cur)) {
+		pcmd = cur->data;
+
+		if (pcmd->is_shingle) {
+			if ((flag_ptr = g_hash_table_lookup (session->ctx->master_flags,
+					GUINT_TO_POINTER (pcmd->cmd.shingle.basic.flag))) != NULL) {
+				pcmd->cmd.shingle.basic.flag = GPOINTER_TO_UINT (flag_ptr);
+			}
+		}
+		else {
+			if ((flag_ptr = g_hash_table_lookup (session->ctx->master_flags,
+					GUINT_TO_POINTER (pcmd->cmd.normal.flag))) != NULL) {
+				pcmd->cmd.normal.flag = GPOINTER_TO_UINT (flag_ptr);
+			}
+		}
+
+
 		g_queue_push_head (session->ctx->updates_pending, cur->data);
 		cur->data = NULL;
 	}
@@ -1738,6 +1746,41 @@ err:
 }
 
 static gboolean
+fuzzy_storage_parse_master_flags (rspamd_mempool_t *pool,
+	const ucl_object_t *obj,
+	gpointer ud,
+	struct rspamd_rcl_section *section,
+	GError **err)
+{
+	const ucl_object_t *cur;
+	struct rspamd_rcl_struct_parser *pd = ud;
+	struct rspamd_fuzzy_storage_ctx *ctx;
+	ucl_object_iter_t it = NULL;
+	gulong remote_flag;
+	gint64 local_flag;
+
+	ctx = pd->user_struct;
+
+	if (ucl_object_type (obj) != UCL_OBJECT) {
+		g_set_error (err, g_quark_try_string ("fuzzy"), 100,
+				"master_flags option must be an object");
+
+		return FALSE;
+	}
+
+	while ((cur = ucl_iterate_object (obj, &it, true)) != NULL) {
+		if (rspamd_strtoul (cur->key, cur->keylen, &remote_flag) &&
+				ucl_object_toint_safe (cur, &local_flag)) {
+			g_hash_table_insert (ctx->master_flags, GUINT_TO_POINTER (remote_flag),
+					GUINT_TO_POINTER (local_flag));
+		}
+	}
+
+	return TRUE;
+}
+
+
+static gboolean
 fuzzy_parse_keypair (rspamd_mempool_t *pool,
 		const ucl_object_t *obj,
 		gpointer ud,
@@ -1836,6 +1879,7 @@ init_fuzzy (struct rspamd_config *cfg)
 	ctx->keypair_cache_size = DEFAULT_KEYPAIR_CACHE_SIZE;
 	ctx->keys = g_hash_table_new_full (fuzzy_kp_hash, fuzzy_kp_equal,
 			NULL, fuzzy_key_dtor);
+	ctx->master_flags = g_hash_table_new (g_direct_hash, g_direct_equal);
 	ctx->errors_ips = rspamd_lru_hash_new_full (1024,
 			(GDestroyNotify) rspamd_inet_address_destroy, g_free,
 			rspamd_inet_address_hash, rspamd_inet_address_equal);
@@ -1991,6 +2035,15 @@ init_fuzzy (struct rspamd_config *cfg)
 			0,
 			RSPAMD_CL_FLAG_MULTIPLE,
 			"List of slave hosts");
+
+	rspamd_rcl_register_worker_option (cfg,
+			type,
+			"master_flags",
+			fuzzy_storage_parse_master_flags,
+			ctx,
+			0,
+			0,
+			"Map of flags in form master_flags = { master_flag = local_flag; ... }; ");
 
 	return ctx;
 }

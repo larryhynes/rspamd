@@ -38,18 +38,18 @@
 
 #undef MAP_DEBUG_REFS
 #ifdef MAP_DEBUG_REFS
-#define MAP_RETAIN(x) do { \
-	msg_err ("retain ref %p, refcount: %d -> %d", (x), (x)->ref.refcount, (x)->ref.refcount + 1); \
+#define MAP_RETAIN(x, t) do { \
+	msg_err (G_GNUC_PRETTY_FUNCTION ": " t ": retain ref %p, refcount: %d -> %d", (x), (x)->ref.refcount, (x)->ref.refcount + 1); \
 	REF_RETAIN(x);	\
 } while (0)
 
-#define MAP_RELEASE(x) do { \
-	msg_err ("release ref %p, refcount: %d -> %d", (x), (x)->ref.refcount, (x)->ref.refcount - 1); \
+#define MAP_RELEASE(x, t) do { \
+	msg_err (G_GNUC_PRETTY_FUNCTION ": " t ": release ref %p, refcount: %d -> %d", (x), (x)->ref.refcount, (x)->ref.refcount - 1); \
 	REF_RELEASE(x);	\
 } while (0)
 #else
-#define MAP_RETAIN REF_RETAIN
-#define MAP_RELEASE REF_RELEASE
+#define MAP_RETAIN(x, t) REF_RETAIN(x)
+#define MAP_RELEASE(x, t) REF_RELEASE(x)
 #endif
 
 static const gchar *hash_fill = "1";
@@ -119,7 +119,7 @@ write_http_request (struct http_callback_data *cbd)
 
 		rspamd_http_connection_write_message (cbd->conn, msg, cbd->data->host,
 				NULL, cbd, cbd->fd, &cbd->tv, cbd->ev_base);
-		MAP_RETAIN (cbd);
+		MAP_RETAIN (cbd, "http_callback_data");
 	}
 	else {
 		msg_err_map ("cannot connect to %s: %s", cbd->data->host,
@@ -271,8 +271,9 @@ free_http_cbdata_common (struct http_callback_data *cbd, gboolean plan_new)
 		rspamd_inet_address_destroy (cbd->addr);
 	}
 
-	MAP_RELEASE (cbd->bk);
-	MAP_RELEASE (periodic);
+
+	MAP_RELEASE (cbd->bk, "rspamd_map_backend");
+	MAP_RELEASE (periodic, "periodic");
 	g_slice_free1 (sizeof (struct http_callback_data), cbd);
 }
 
@@ -310,7 +311,7 @@ http_map_error (struct rspamd_http_connection *conn,
 	cbd->periodic->errored = TRUE;
 	msg_err_map ("connection with http server terminated incorrectly: %e", err);
 	rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
-	MAP_RELEASE (cbd);
+	MAP_RELEASE (cbd, "http_callback_data");
 }
 
 static void
@@ -319,7 +320,7 @@ rspamd_map_cache_cb (gint fd, short what, gpointer ud)
 	struct rspamd_http_map_cached_cbdata *cache_cbd = ud;
 
 	g_atomic_int_set (&cache_cbd->map->cache->available, 0);
-	REF_RELEASE (cache_cbd->shm);
+	MAP_RELEASE (cache_cbd->shm, "rspamd_http_map_cached_cbdata");
 	event_del (&cache_cbd->timeout);
 	g_slice_free1 (sizeof (*cache_cbd), cache_cbd);
 }
@@ -344,7 +345,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 			/* Reset the whole chain */
 			cbd->periodic->cur_backend = 0;
 			rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
-			MAP_RELEASE (cbd);
+			MAP_RELEASE (cbd, "http_callback_data");
 
 			return 0;
 		}
@@ -373,22 +374,16 @@ http_map_finish (struct rspamd_http_connection *conn,
 				cbd->data_len = msg->body_buf.len;
 				rspamd_http_connection_reset (cbd->conn);
 				write_http_request (cbd);
-				MAP_RELEASE (cbd);
+				MAP_RELEASE (cbd, "http_callback_data");
 
 				return 0;
 			}
 			else {
 				/* Unsinged version - just open file */
 				cbd->shmem_data = rspamd_http_message_shmem_ref (msg);
-				in = rspamd_shmem_xmap (cbd->shmem_data->shm_name, PROT_READ, &inlen);
 				cbd->data_len = msg->body_buf.len;
 
-				if (in == NULL) {
-					msg_err_map ("cannot read tempfile %s: %s",
-							cbd->shmem_data->shm_name,
-							strerror (errno));
-					goto err;
-				}
+				goto read_data;
 			}
 		}
 		else if (cbd->stage == map_load_pubkey) {
@@ -425,7 +420,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 			cbd->stage = map_load_signature;
 			rspamd_http_connection_reset (cbd->conn);
 			write_http_request (cbd);
-			MAP_RELEASE (cbd);
+			MAP_RELEASE (cbd, "http_callback_data");
 
 			return 0;
 		}
@@ -470,6 +465,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 			munmap (in, dlen);
 		}
 
+read_data:
 		g_assert (cbd->shmem_data != NULL);
 
 		in = rspamd_shmem_xmap (cbd->shmem_data->shm_name, PROT_READ, &dlen);
@@ -499,7 +495,7 @@ http_map_finish (struct rspamd_http_connection *conn,
 			cache_cbd = g_slice_alloc0 (sizeof (*cache_cbd));
 			cache_cbd->shm = cbd->shmem_data;
 			cache_cbd->map = map;
-			REF_RETAIN (cache_cbd->shm);
+			MAP_RETAIN (cache_cbd->shm, "shmem_data");
 			event_set (&cache_cbd->timeout, -1, EV_TIMEOUT, rspamd_map_cache_cb,
 					cache_cbd);
 			event_base_set (cbd->ev_base, &cache_cbd->timeout);
@@ -530,13 +526,13 @@ http_map_finish (struct rspamd_http_connection *conn,
 				bk->uri, cbd->data->host, msg->code);
 	}
 
-	MAP_RELEASE (cbd);
+	MAP_RELEASE (cbd, "http_callback_data");
 	return 0;
 
 err:
 	cbd->periodic->errored = 1;
 	rspamd_map_periodic_callback (-1, EV_TIMEOUT, cbd->periodic);
-	MAP_RELEASE (cbd);
+	MAP_RELEASE (cbd, "http_callback_data");
 
 	return 0;
 }
@@ -603,8 +599,11 @@ rspamd_map_periodic_dtor (struct map_periodic_cbdata *periodic)
 		/* Not modified */
 	}
 
-	rspamd_map_schedule_periodic (periodic->map, FALSE, FALSE, FALSE);
-	g_atomic_int_set (periodic->map->locked, 0);
+	if (periodic->locked) {
+		rspamd_map_schedule_periodic (periodic->map, FALSE, FALSE, FALSE);
+		g_atomic_int_set (periodic->map->locked, 0);
+	}
+
 	g_slice_free1 (sizeof (*periodic), periodic);
 }
 
@@ -627,7 +626,7 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 		timeout = map->poll_timeout * error_mult;
 	}
 	else if (locked) {
-		timeout = map->poll_timeout * lock_mult;
+		timeout = lock_mult;
 	}
 
 	cbd = g_slice_alloc0 (sizeof (*cbd));
@@ -638,8 +637,6 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 	cbd->map = map;
 	REF_INIT_RETAIN (cbd, rspamd_map_periodic_dtor);
 
-	msg_debug_map ("schedule new periodic event %p in %.2f seconds", cbd, timeout);
-
 	if (initial) {
 		evtimer_set (&map->ev, rspamd_map_periodic_callback, cbd);
 		event_base_set (map->ev_base, &map->ev);
@@ -647,9 +644,11 @@ rspamd_map_schedule_periodic (struct rspamd_map *map,
 	else {
 		evtimer_del (&map->ev);
 		evtimer_set (&map->ev, rspamd_map_periodic_callback, cbd);
+		event_base_set (map->ev_base, &map->ev);
 	}
 
 	jittered_sec = rspamd_time_jitter (timeout, 0);
+	msg_debug_map ("schedule new periodic event %p in %.2f seconds", cbd, jittered_sec);
 	double_to_tv (jittered_sec, &map->tv);
 
 	evtimer_add (&map->ev, &map->tv);
@@ -708,7 +707,7 @@ rspamd_map_dns_callback (struct rdns_reply *reply, void *arg)
 		}
 	}
 
-	MAP_RELEASE (cbd);
+	MAP_RELEASE (cbd, "http_callback_data");
 }
 
 static gboolean
@@ -779,9 +778,9 @@ rspamd_map_common_http_callback (struct rspamd_map *map, struct rspamd_map_backe
 	cbd->fd = -1;
 	cbd->check = check;
 	cbd->periodic = periodic;
-	MAP_RETAIN (periodic);
+	MAP_RETAIN (periodic, "periodic");
 	cbd->bk = bk;
-	MAP_RETAIN (bk);
+	MAP_RETAIN (bk, "rspamd_map_backend");
 	cbd->stage = map_resolve_host2;
 	double_to_tv (map->cfg->map_timeout, &cbd->tv);
 	REF_INIT_RETAIN (cbd, free_http_cbdata);
@@ -793,12 +792,12 @@ rspamd_map_common_http_callback (struct rspamd_map *map, struct rspamd_map_backe
 		if (rdns_make_request_full (map->r->r, rspamd_map_dns_callback, cbd,
 				map->cfg->dns_timeout, map->cfg->dns_retransmits, 1,
 				data->host, RDNS_REQUEST_A)) {
-			MAP_RETAIN (cbd);
+			MAP_RETAIN (cbd, "http_callback_data");
 		}
 		if (rdns_make_request_full (map->r->r, rspamd_map_dns_callback, cbd,
 				map->cfg->dns_timeout, map->cfg->dns_retransmits, 1,
 				data->host, RDNS_REQUEST_AAAA)) {
-			MAP_RETAIN (cbd);
+			MAP_RETAIN (cbd, "http_callback_data");
 		}
 
 		map->dtor = free_http_cbdata_dtor;
@@ -810,7 +809,7 @@ rspamd_map_common_http_callback (struct rspamd_map *map, struct rspamd_map_backe
 	}
 
 	/* We don't need own ref as it is now ref counted by DNS handlers */
-	MAP_RELEASE (cbd);
+	MAP_RELEASE (cbd, "http_callback_data");
 }
 
 static void
@@ -900,12 +899,33 @@ rspamd_map_periodic_callback (gint fd, short what, void *ud)
 {
 	struct rspamd_map_backend *bk;
 	struct map_periodic_cbdata *cbd = ud;
+	struct rspamd_map *map;
+
+	map = cbd->map;
+
+	if (!cbd->locked) {
+		if (!g_atomic_int_compare_and_exchange (cbd->map->locked, 0, 1)) {
+			msg_debug_map (
+					"don't try to reread map as it is locked by other process, "
+					"will reread it later");
+			rspamd_map_schedule_periodic (map, TRUE, FALSE, FALSE);
+			MAP_RELEASE (cbd, "periodic");
+
+			return;
+		}
+		else {
+			cbd->locked = TRUE;
+		}
+	}
 
 	if (cbd->errored) {
 		/* We should not check other backends if some backend has failed */
 		rspamd_map_schedule_periodic (cbd->map, FALSE, FALSE, TRUE);
-		g_atomic_int_set (cbd->map->locked, 0);
-		MAP_RELEASE (cbd);
+
+		if (cbd->locked) {
+			g_atomic_int_set (cbd->map->locked, 0);
+		}
+		MAP_RELEASE (cbd, "periodic");
 
 		return;
 	}
@@ -913,7 +933,7 @@ rspamd_map_periodic_callback (gint fd, short what, void *ud)
 	/* For each backend we need to check for modifications */
 	if (cbd->cur_backend >= cbd->map->backends->len) {
 		/* Last backend */
-		MAP_RELEASE (cbd);
+		MAP_RELEASE (cbd, "periodic");
 
 		return;
 	}
@@ -956,15 +976,7 @@ rspamd_map_watch (struct rspamd_config *cfg,
 		map->ev_base = ev_base;
 		map->r = resolver;
 
-		if (!g_atomic_int_compare_and_exchange (map->locked, 0, 1)) {
-			msg_debug_map (
-					"don't try to reread map as it is locked by other process, "
-					"will reread it later");
-			rspamd_map_schedule_periodic (map, TRUE, TRUE, FALSE);
-		}
-		else {
-			rspamd_map_schedule_periodic (map, FALSE, TRUE, FALSE);
-		}
+		rspamd_map_schedule_periodic (map, FALSE, TRUE, FALSE);
 
 		cur = g_list_next (cur);
 	}
@@ -983,7 +995,11 @@ rspamd_map_remove_all (struct rspamd_config *cfg)
 
 		for (i = 0; i < map->backends->len; i ++) {
 			bk = g_ptr_array_index (map->backends, i);
-			MAP_RELEASE (bk);
+			MAP_RELEASE (bk, "rspamd_map_backend");
+		}
+
+		if (g_atomic_int_compare_and_exchange (&map->cache->available, 1, 0)) {
+			unlink (map->cache->shmem_name);
 		}
 
 		if (map->dtor) {
@@ -1204,7 +1220,7 @@ rspamd_map_parse_backend (struct rspamd_config *cfg, const gchar *map_line)
 	return bk;
 
 err:
-	MAP_RELEASE (bk);
+	MAP_RELEASE (bk, "rspamd_map_backend");
 
 	if (hdata) {
 		g_slice_free1 (sizeof (*hdata), hdata);
@@ -1404,7 +1420,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 				g_ptr_array_add (map->backends, bk);
 
 				if (!map->name) {
-					map->name = g_strdup (ucl_object_tostring (cur));
+					map->name = g_strdup (ucl_object_tostring (elt));
 				}
 			}
 		}

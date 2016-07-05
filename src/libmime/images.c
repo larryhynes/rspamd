@@ -15,29 +15,30 @@
  */
 #include "config.h"
 #include "images.h"
-#include "rspamd.h"
+#include "task.h"
 #include "message.h"
 #include "html.h"
 
 static const guint8 png_signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
 static const guint8 jpg_sig1[] = {0xff, 0xd8};
-static const guint8 jpg_sig2[] = {'J', 'F', 'I', 'F'};
+static const guint8 jpg_sig_jfif[] = {0xff, 0xe0};
+static const guint8 jpg_sig_exif[] = {0xff, 0xe1};
 static const guint8 gif_signature[] = {'G', 'I', 'F', '8'};
 static const guint8 bmp_signature[] = {'B', 'M'};
 
-static void process_image (struct rspamd_task *task, struct mime_part *part);
+static void process_image (struct rspamd_task *task, struct rspamd_mime_part *part);
 
 
 void
 rspamd_images_process (struct rspamd_task *task)
 {
 	guint i;
-	struct mime_part *part;
+	struct rspamd_mime_part *part;
 
 	for (i = 0; i < task->parts->len; i ++) {
 		part = g_ptr_array_index (task->parts, i);
-		if (g_mime_content_type_is_type (part->type, "image",
-			"*") && part->content->len > 0) {
+		if (g_mime_content_type_is_type (part->type, "image", "*") &&
+				part->content->len > 0) {
 			process_image (task, part);
 		}
 	}
@@ -54,7 +55,8 @@ detect_image_type (GByteArray *data)
 	}
 	if (data->len > 10) {
 		if (memcmp (data->data, jpg_sig1, sizeof (jpg_sig1)) == 0) {
-			if (memcmp (data->data + 6, jpg_sig2, sizeof (jpg_sig2)) == 0) {
+			if (memcmp (data->data + 2, jpg_sig_jfif, sizeof (jpg_sig_jfif)) == 0 ||
+					memcmp (data->data + 2, jpg_sig_exif, sizeof (jpg_sig_exif)) == 0) {
 				return IMAGE_TYPE_JPG;
 			}
 		}
@@ -188,12 +190,12 @@ process_bmp_image (struct rspamd_task *task, GByteArray *data)
 }
 
 static void
-process_image (struct rspamd_task *task, struct mime_part *part)
+process_image (struct rspamd_task *task, struct rspamd_mime_part *part)
 {
 	enum rspamd_image_type type;
 	struct rspamd_image *img = NULL;
 	struct raw_header *rh;
-	struct mime_text_part *tp;
+	struct rspamd_mime_text_part *tp;
 	struct html_image *himg;
 	const gchar *cid, *html_cid;
 	guint cid_len, i, j;
@@ -224,7 +226,8 @@ process_image (struct rspamd_task *task, struct mime_part *part)
 			img->width, img->height,
 			task->message_id);
 		img->filename = part->filename;
-		task->images = g_list_prepend (task->images, img);
+		part->flags |= RSPAMD_MIME_PART_IMAGE;
+		part->specific_data = img;
 
 		/* Check Content-Id */
 		rh = g_hash_table_lookup (part->raw_headers, "Content-Id");

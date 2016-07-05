@@ -1022,6 +1022,45 @@ rspamd_controller_handle_pie_chart (
 	return 0;
 }
 
+void
+rspamd_controller_graph_point (gulong t, gulong step,
+		struct rspamd_rrd_query_result* rrd_result,
+		gdouble *acc,
+		ucl_object_t **elt)
+{
+	guint nan_cnt;
+	gdouble sum = 0.0, yval;
+	ucl_object_t* data_elt;
+	guint i, j;
+
+	for (i = 0; i < rrd_result->ds_count; i++) {
+		sum = 0.0;
+		nan_cnt = 0;
+		data_elt = ucl_object_typed_new (UCL_OBJECT);
+		ucl_object_insert_key (data_elt, ucl_object_fromint (t), "x", 1, false);
+
+		for (j = 0; j < step; j++) {
+			yval = acc[i + j * rrd_result->ds_count];
+			if (isnan(yval)) {
+				nan_cnt++;
+			}
+			else {
+				sum += yval;
+			}
+		}
+		if (nan_cnt == step) {
+			ucl_object_insert_key (data_elt, ucl_object_typed_new (UCL_NULL),
+					"y", 1, false);
+		}
+		else {
+			ucl_object_insert_key (data_elt,
+					ucl_object_fromdouble (sum / (gdouble) step), "y", 1,
+					false);
+		}
+		ucl_array_append (elt[i], data_elt);
+	}
+}
+
 /*
  * Graph command handler:
  * request: /graph?type=<hourly|daily|weekly|monthly>
@@ -1042,8 +1081,9 @@ rspamd_controller_handle_graph (
 	struct rspamd_controller_worker_ctx *ctx;
 	rspamd_ftok_t srch, *value;
 	struct rspamd_rrd_query_result *rrd_result;
-	gulong i, j, ts, start_row, cnt, t;
-	ucl_object_t *res, *elt[4], *data_elt;
+	gulong i, j, k, start_row, cnt, t, ts, step;
+	gdouble *acc;
+	ucl_object_t *res, *elt[4];
 	enum {
 		rra_hourly = 0,
 		rra_daily,
@@ -1051,6 +1091,8 @@ rspamd_controller_handle_graph (
 		rra_monthly,
 		rra_invalid
 	} rra_num = rra_invalid;
+	/* How many points are we going to send to display */
+	static const guint desired_points = 500;
 
 	ctx = session->ctx;
 
@@ -1080,16 +1122,16 @@ rspamd_controller_handle_graph (
 		return 0;
 	}
 
-	if (strncmp (value->begin, "hourly", value->len) == 0) {
+	if (value->len == 6 && rspamd_lc_cmp (value->begin, "hourly", value->len) == 0) {
 		rra_num = rra_hourly;
 	}
-	else if (strncmp (value->begin, "daily", value->len) == 0) {
-		rra_num = rra_hourly;
+	else if (value->len == 5 && rspamd_lc_cmp (value->begin, "daily", value->len) == 0) {
+		rra_num = rra_daily;
 	}
-	else if (strncmp (value->begin, "weekly", value->len) == 0) {
-		rra_num = rra_hourly;
+	else if (value->len == 6 && rspamd_lc_cmp (value->begin, "weekly", value->len) == 0) {
+		rra_num = rra_weekly;
 	}
-	else if (strncmp (value->begin, "monthly", value->len) == 0) {
+	else if (value->len == 7 && rspamd_lc_cmp (value->begin, "monthly", value->len) == 0) {
 		rra_num = rra_monthly;
 	}
 
@@ -1123,36 +1165,43 @@ rspamd_controller_handle_graph (
 
 	start_row = rrd_result->cur_row == rrd_result->rra_rows - 1 ?
 				0 : rrd_result->cur_row;
+	t = ts * rrd_result->pdp_per_cdp;
+	k = 0;
 
-	for (i = start_row, cnt = 0; cnt < rrd_result->rra_rows; cnt ++) {
+	/* Create window */
+	step = (rrd_result->rra_rows / desired_points + 0.5);
+	acc = g_malloc0 (sizeof (double) * rrd_result->ds_count * step);
+
+	for (i = start_row, cnt = 0; cnt < rrd_result->rra_rows;
+			cnt ++) {
 		for (j = 0; j < rrd_result->ds_count; j++) {
-			gdouble yval;
-
-			data_elt = ucl_object_typed_new (UCL_OBJECT);
-			t = ts * rrd_result->pdp_per_cdp;
-			ucl_object_insert_key (data_elt,
-					ucl_object_fromint (t),
-					"x", 1,
-					false);
-			yval = rrd_result->data[i * rrd_result->ds_count + j];
-
-			if (!isnan (yval)) {
-				ucl_object_insert_key (data_elt,
-						ucl_object_fromdouble (yval),
-						"y", 1,
-						false);
+			if (k < step) {
+				/* Just update window */
+				acc[k * rrd_result->ds_count + j] =
+						rrd_result->data[i * rrd_result->ds_count + j];
+				k ++;
 			}
 			else {
-				ucl_object_insert_key (data_elt,
-						ucl_object_typed_new (UCL_NULL),
-						"y", 1,
-						false);
+				t = ts * rrd_result->pdp_per_cdp;
+
+				/* Need a fresh point */
+				rspamd_controller_graph_point (t, step, rrd_result, acc, elt);
+				k = 0;
 			}
-			ucl_array_append (elt[j], data_elt);
 		}
 
-		i = start_row == 0 ? i + 1 : (i + 1) % start_row;
+		if (i == rrd_result->rra_rows - 1) {
+			i = 0;
+		}
+		else {
+			i ++;
+		}
+
 		ts ++;
+	}
+
+	if (k > 0) {
+		rspamd_controller_graph_point (t, k, rrd_result, acc, elt);
 	}
 
 	for (i = 0; i < rrd_result->ds_count; i++) {
@@ -1161,6 +1210,7 @@ rspamd_controller_handle_graph (
 
 	rspamd_controller_send_ucl (conn_ent, res);
 	ucl_object_unref (res);
+	g_free (acc);
 
 	return 0;
 }
@@ -2619,13 +2669,23 @@ start_controller_worker (struct rspamd_worker *worker)
 
 	/* RRD collector */
 	if (ctx->cfg->rrd_file && worker->index == 0) {
-		ctx->rrd = rspamd_rrd_file_default (ctx->cfg->rrd_file, NULL);
+		GError *rrd_err = NULL;
+
+		ctx->rrd = rspamd_rrd_file_default (ctx->cfg->rrd_file, &rrd_err);
 
 		if (ctx->rrd) {
 			ctx->rrd_event = g_slice_alloc0 (sizeof (*ctx->rrd_event));
 			evtimer_set (ctx->rrd_event, rspamd_controller_rrd_update, ctx);
 			event_base_set (ctx->ev_base, ctx->rrd_event);
 			event_add (ctx->rrd_event, &rrd_update_time);
+		}
+		else if (rrd_err) {
+			msg_err ("cannot load rrd from %s: %e", ctx->cfg->rrd_file,
+					rrd_err);
+			g_error_free (rrd_err);
+		}
+		else {
+			msg_err ("cannot load rrd from %s: unknown error", ctx->cfg->rrd_file);
 		}
 	}
 	else {

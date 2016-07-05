@@ -68,8 +68,8 @@ rspamd_stat_tokenize_parts_metadata (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task)
 {
 	struct rspamd_image *img;
-	struct mime_part *part;
-	struct mime_text_part *tp;
+	struct rspamd_mime_part *part;
+	struct rspamd_mime_text_part *tp;
 	GList *cur;
 	GArray *ar;
 	rspamd_ftok_t elt;
@@ -78,36 +78,36 @@ rspamd_stat_tokenize_parts_metadata (struct rspamd_stat_ctx *st_ctx,
 	ar = g_array_sized_new (FALSE, FALSE, sizeof (elt), 4);
 
 	/* Insert images */
-	cur = g_list_first (task->images);
+	for (i = 0; i < task->parts->len; i ++) {
+		part = g_ptr_array_index (task->parts, i);
 
-	while (cur) {
-		img = cur->data;
+		if (part->flags & RSPAMD_MIME_PART_IMAGE) {
+			img = part->specific_data;
 
-		/* If an image has a linked HTML part, then we push its details to the stat */
-		if (img->html_image) {
-			elt.begin = (gchar *)"image";
-			elt.len = 5;
-			g_array_append_val (ar, elt);
-			elt.begin = (gchar *)&img->html_image->height;
-			elt.len = sizeof (img->html_image->height);
-			g_array_append_val (ar, elt);
-			elt.begin = (gchar *)&img->html_image->width;
-			elt.len = sizeof (img->html_image->width);
-			g_array_append_val (ar, elt);
-			elt.begin = (gchar *)&img->type;
-			elt.len = sizeof (img->type);
-			g_array_append_val (ar, elt);
-
-			if (img->filename) {
-				elt.begin = (gchar *)img->filename;
-				elt.len = strlen (elt.begin);
+			/* If an image has a linked HTML part, then we push its details to the stat */
+			if (img->html_image) {
+				elt.begin = (gchar *)"image";
+				elt.len = 5;
 				g_array_append_val (ar, elt);
+				elt.begin = (gchar *)&img->html_image->height;
+				elt.len = sizeof (img->html_image->height);
+				g_array_append_val (ar, elt);
+				elt.begin = (gchar *)&img->html_image->width;
+				elt.len = sizeof (img->html_image->width);
+				g_array_append_val (ar, elt);
+				elt.begin = (gchar *)&img->type;
+				elt.len = sizeof (img->type);
+				g_array_append_val (ar, elt);
+
+				if (img->filename) {
+					elt.begin = (gchar *)img->filename;
+					elt.len = strlen (elt.begin);
+					g_array_append_val (ar, elt);
+				}
+
+				msg_debug_task ("added stat tokens for image '%s'", img->html_image->src);
 			}
-
-			msg_debug_task ("added stat tokens for image '%s'", img->html_image->src);
 		}
-
-		cur = g_list_next (cur);
 	}
 
 	/* Process mime parts */
@@ -169,7 +169,7 @@ static void
 rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 		struct rspamd_task *task)
 {
-	struct mime_text_part *part;
+	struct rspamd_mime_text_part *part;
 	GArray *words;
 	gchar *sub;
 	guint i, reserved_len = 0;

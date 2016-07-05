@@ -54,12 +54,7 @@
 #define DEFAULT_RETRANSMITS 3
 #define DEFAULT_PORT 11335
 
-/*
- * WARNING:
- * As 1.3 is not yet stable, we want to keep compatibility here as 1.2 won't
- * recognize version 4 unless 1.2.7
- */
-#define RSPAMD_FUZZY_PLUGIN_VERSION 3
+#define RSPAMD_FUZZY_PLUGIN_VERSION RSPAMD_FUZZY_VERSION
 
 static const gint rspamd_fuzzy_hash_len = 5;
 
@@ -145,7 +140,7 @@ struct fuzzy_learn_session {
 struct fuzzy_cmd_io {
 	guint32 tag;
 	guint32 flags;
-	struct rspamd_fuzzy_cmd *cmd;
+	struct rspamd_fuzzy_cmd cmd;
 	struct iovec io;
 };
 
@@ -996,7 +991,7 @@ fuzzy_io_fin (void *ud)
 }
 
 static GArray *
-fuzzy_preprocess_words (struct mime_text_part *part, rspamd_mempool_t *pool)
+fuzzy_preprocess_words (struct rspamd_mime_text_part *part, rspamd_mempool_t *pool)
 {
 	return part->normalized_words;
 }
@@ -1102,7 +1097,7 @@ fuzzy_cmd_from_task_meta (struct fuzzy_rule *rule,
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->flags = 0;
 	io->tag = cmd->tag;
-	io->cmd = cmd;
+	memcpy (&io->cmd, cmd, sizeof (io->cmd));
 
 	if (rule->peer_key) {
 		fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *)cmd, sizeof (*cmd));
@@ -1144,7 +1139,7 @@ fuzzy_cmd_stat (struct fuzzy_rule *rule,
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->flags = 0;
 	io->tag = cmd->tag;
-	io->cmd = cmd;
+	memcpy (&io->cmd, cmd, sizeof (io->cmd));
 
 	if (rule->peer_key) {
 		fuzzy_encrypt_cmd (rule, &enccmd->hdr, (guchar *)cmd, sizeof (*cmd));
@@ -1162,7 +1157,7 @@ fuzzy_cmd_stat (struct fuzzy_rule *rule,
 static void *
 fuzzy_cmd_get_cached (struct fuzzy_rule *rule,
 		rspamd_mempool_t *pool,
-		struct mime_text_part *part)
+		struct rspamd_mime_text_part *part)
 {
 	gchar key[32];
 	gint key_part;
@@ -1177,7 +1172,7 @@ fuzzy_cmd_get_cached (struct fuzzy_rule *rule,
 static void
 fuzzy_cmd_set_cached (struct fuzzy_rule *rule,
 		rspamd_mempool_t *pool,
-		struct mime_text_part *part,
+		struct rspamd_mime_text_part *part,
 		struct rspamd_fuzzy_encrypted_shingle_cmd *data)
 {
 	gchar key[32];
@@ -1199,7 +1194,7 @@ fuzzy_cmd_from_text_part (struct fuzzy_rule *rule,
 		gint flag,
 		guint32 weight,
 		rspamd_mempool_t *pool,
-		struct mime_text_part *part)
+		struct rspamd_mime_text_part *part)
 {
 	struct rspamd_fuzzy_shingle_cmd *shcmd;
 	struct rspamd_fuzzy_encrypted_shingle_cmd *encshcmd, *cached;
@@ -1268,7 +1263,7 @@ fuzzy_cmd_from_text_part (struct fuzzy_rule *rule,
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->tag = shcmd->basic.tag;
 	io->flags = 0;
-	io->cmd = &shcmd->basic;
+	memcpy (&io->cmd, &shcmd->basic, sizeof (io->cmd));
 
 	if (rule->peer_key) {
 		/* Encrypt data */
@@ -1322,7 +1317,7 @@ fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->flags = 0;
 	io->tag = cmd->tag;
-	io->cmd = cmd;
+	memcpy (&io->cmd, cmd, sizeof (io->cmd));
 
 	if (rule->peer_key) {
 		g_assert (enccmd != NULL);
@@ -1467,7 +1462,7 @@ fuzzy_process_reply (guchar **pos, gint *r, GPtrArray *req,
 				io->flags |= FUZZY_CMD_FLAG_REPLIED;
 
 				if (pcmd) {
-					*pcmd = io->cmd;
+					*pcmd = &io->cmd;
 				}
 
 				return rep;
@@ -1991,14 +1986,14 @@ static GPtrArray *
 fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 		gint c, gint flag, guint32 value)
 {
-	struct mime_text_part *part;
-	struct mime_part *mime_part;
+	struct rspamd_mime_text_part *part;
+	struct rspamd_mime_part *mime_part;
 	struct rspamd_image *image;
 	struct fuzzy_cmd_io *io;
 	guint i;
 	GPtrArray *res;
 
-	res = g_ptr_array_new ();
+	res = g_ptr_array_sized_new (task->parts->len + 1);
 
 	if (c == FUZZY_STAT) {
 		io = fuzzy_cmd_stat (rule, c, flag, value, task->task_pool);
@@ -2047,18 +2042,18 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 		}
 	}
 
-	/* Process images */
-	GList *cur;
+	/* Process other parts and images */
+	for (i = 0; i < task->parts->len; i ++) {
+		mime_part = g_ptr_array_index (task->parts, i);
 
-	cur = task->images;
-	while (cur) {
-		image = cur->data;
-		if (image->data->len > 0) {
-			if (fuzzy_module_ctx->min_height <= 0 || image->height >=
-				fuzzy_module_ctx->min_height) {
-				if (fuzzy_module_ctx->min_width <= 0 || image->width >=
-					fuzzy_module_ctx->min_width) {
-					if (c == FUZZY_CHECK) {
+		if (mime_part->flags & RSPAMD_MIME_PART_IMAGE) {
+			image = mime_part->specific_data;
+
+			if (image->data->len > 0) {
+				if (fuzzy_module_ctx->min_height <= 0 || image->height >=
+						fuzzy_module_ctx->min_height) {
+					if (fuzzy_module_ctx->min_width <= 0 || image->width >=
+							fuzzy_module_ctx->min_width) {
 						io = fuzzy_cmd_from_data_part (rule, c, flag, value,
 								task->task_pool,
 								image->data->data, image->data->len);
@@ -2066,21 +2061,9 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 							g_ptr_array_add (res, io);
 						}
 					}
-					io = fuzzy_cmd_from_data_part (rule, c, flag, value,
-							task->task_pool,
-							image->data->data, image->data->len);
-					if (io) {
-						g_ptr_array_add (res, io);
-					}
 				}
 			}
 		}
-		cur = g_list_next (cur);
-	}
-
-	/* Process other parts */
-	for (i = 0; i < task->parts->len; i ++) {
-		mime_part = g_ptr_array_index (task->parts, i);
 
 		if (mime_part->content->len > 0 &&
 			fuzzy_check_content_type (rule, mime_part->type)) {
@@ -2348,17 +2331,28 @@ fuzzy_process_handler (struct rspamd_http_connection_entry *conn_ent,
 			*ptask = task;
 			rspamd_lua_setclass (L, "rspamd{task}", -1);
 
-			if (lua_pcall (L, 1, 1, err_idx) != 0) {
+			if (lua_pcall (L, 1, LUA_MULTRET, err_idx) != 0) {
 				tb = lua_touserdata (L, -1);
 				msg_err_task ("call to user extraction script failed: %v", tb);
 				g_string_free (tb, TRUE);
 			}
 			else {
-				skip = !(lua_toboolean (L, -1));
+				if (lua_gettop (L) > 1) {
+					skip = !(lua_toboolean (L, -2));
+
+					if (lua_isnumber (L, -1)) {
+						msg_info_task ("learn condition changed flag from %d to "
+								"%d", flag, (guint)lua_tonumber (L, -1));
+						flag = lua_tonumber (L, -1);
+					}
+				}
+				else {
+					skip = !(lua_toboolean (L, -1));
+				}
 			}
 
 			/* Result + error function */
-			lua_pop (L, 2);
+			lua_settop (L, 0);
 
 			if (skip) {
 				msg_info_task ("skip rule %s as its condition callback returned"
