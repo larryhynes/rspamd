@@ -35,6 +35,7 @@
 #include "libutil/map.h"
 #include "rspamd.h"
 #include "utlist.h"
+#include "lua/lua_common.h"
 
 #define DEFAULT_SYMBOL_REJECT "R_DKIM_REJECT"
 #define DEFAULT_SYMBOL_TEMPFAIL "R_DKIM_TEMPFAIL"
@@ -42,6 +43,7 @@
 #define DEFAULT_CACHE_SIZE 2048
 #define DEFAULT_CACHE_MAXAGE 86400
 #define DEFAULT_TIME_JITTER 60
+#define DEFAULT_MAX_SIGS 5
 
 struct dkim_ctx {
 	struct module_ctx ctx;
@@ -55,6 +57,10 @@ struct dkim_ctx {
 	guint strict_multiplier;
 	guint time_jitter;
 	rspamd_lru_hash_t *dkim_hash;
+	rspamd_lru_hash_t *dkim_sign_hash;
+	const gchar *sign_headers;
+	gint sign_condition_ref;
+	guint max_sigs;
 	gboolean trusted_only;
 	gboolean skip_multi;
 };
@@ -72,6 +78,7 @@ struct dkim_check_result {
 static struct dkim_ctx *dkim_module_ctx = NULL;
 
 static void dkim_symbol_callback (struct rspamd_task *task, void *unused);
+static void dkim_sign_callback (struct rspamd_task *task, void *unused);
 
 /* Initialization */
 gint dkim_module_init (struct rspamd_config *cfg, struct module_ctx **ctx);
@@ -101,6 +108,13 @@ dkim_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 	dkim_module_ctx = g_malloc0 (sizeof (struct dkim_ctx));
 
 	dkim_module_ctx->dkim_pool = rspamd_mempool_new (rspamd_mempool_suggest_size (), NULL);
+	dkim_module_ctx->sign_headers = "from:sender:reply-to:subject:date:message-id:"
+			"to:cc:mime-version:content-type:content-transfer-encoding:"
+			"resent-to:resent-cc:resent-from:resent-sender:resent-message-id:"
+			"in-reply-to:references:list-id:list-owner:list-unsubscribe:"
+			"list-subscribe:list-post";
+	dkim_module_ctx->sign_condition_ref = -1;
+	dkim_module_ctx->max_sigs = DEFAULT_MAX_SIGS;
 
 	*ctx = (struct module_ctx *)dkim_module_ctx;
 
@@ -212,6 +226,24 @@ dkim_module_init (struct rspamd_config *cfg, struct module_ctx **ctx)
 			0,
 			NULL,
 			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"dkim",
+			"Lua script that tells if a message should be signed and with what params",
+			"sign_condition",
+			UCL_STRING,
+			NULL,
+			0,
+			NULL,
+			0);
+	rspamd_rcl_add_doc_by_path (cfg,
+			"dkim",
+			"Maximum number of DKIM signatures to check",
+			"max_sigs",
+			UCL_INT,
+			NULL,
+			0,
+			NULL,
+			0);
 
 	return 0;
 }
@@ -220,7 +252,7 @@ gint
 dkim_module_config (struct rspamd_config *cfg)
 {
 	const ucl_object_t *value;
-	gint res = TRUE, cb_id;
+	gint res = TRUE, cb_id = -1, check_id = -1;
 	guint cache_size;
 	gboolean got_trusted = FALSE;
 
@@ -268,12 +300,19 @@ dkim_module_config (struct rspamd_config *cfg)
 	else {
 		dkim_module_ctx->time_jitter = DEFAULT_TIME_JITTER;
 	}
+
+	if ((value =
+			rspamd_config_get_module_opt (cfg, "dkim", "max_sigs")) != NULL) {
+		dkim_module_ctx->max_sigs = ucl_object_toint (value);
+	}
+
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim", "whitelist")) != NULL) {
 
 		rspamd_config_radix_from_ucl (cfg, value, "DKIM whitelist",
 				&dkim_module_ctx->whitelist_ip, NULL);
 	}
+
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim", "domains")) != NULL) {
 		if (!rspamd_map_add_from_ucl (cfg, value,
@@ -286,6 +325,7 @@ dkim_module_config (struct rspamd_config *cfg)
 			got_trusted = TRUE;
 		}
 	}
+
 	if (!got_trusted && (value =
 			rspamd_config_get_module_opt (cfg, "dkim", "trusted_domains")) != NULL) {
 		if (!rspamd_map_add_from_ucl (cfg, value,
@@ -298,6 +338,7 @@ dkim_module_config (struct rspamd_config *cfg)
 			got_trusted = TRUE;
 		}
 	}
+
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim",
 		"strict_multiplier")) != NULL) {
@@ -306,6 +347,7 @@ dkim_module_config (struct rspamd_config *cfg)
 	else {
 		dkim_module_ctx->strict_multiplier = 1;
 	}
+
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim", "trusted_only")) != NULL) {
 		dkim_module_ctx->trusted_only = ucl_obj_toboolean (value);
@@ -313,6 +355,7 @@ dkim_module_config (struct rspamd_config *cfg)
 	else {
 		dkim_module_ctx->trusted_only = FALSE;
 	}
+
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "dkim", "skip_multi")) != NULL) {
 		dkim_module_ctx->skip_multi = ucl_obj_toboolean (value);
@@ -356,6 +399,58 @@ dkim_module_config (struct rspamd_config *cfg)
 		msg_warn_config (
 			"openssl is not found so dkim rsa check is disabled, only check body hash, it is NOT safe to trust these results");
 #endif
+	}
+
+	if ((value = rspamd_config_get_module_opt (cfg, "dkim", "sign_condition"))
+			!= NULL) {
+		const gchar *lua_script;
+
+		lua_script = ucl_object_tostring (value);
+
+		if (lua_script) {
+			if (luaL_dostring (cfg->lua_state, lua_script) != 0) {
+				msg_err_config ("cannot execute lua script for fuzzy "
+						"learn condition: %s", lua_tostring (cfg->lua_state, -1));
+			}
+			else {
+				if (lua_type (cfg->lua_state, -1) == LUA_TFUNCTION) {
+					dkim_module_ctx->sign_condition_ref = luaL_ref (cfg->lua_state,
+							LUA_REGISTRYINDEX);
+
+					dkim_module_ctx->dkim_sign_hash = rspamd_lru_hash_new (
+									128,
+									g_free, /* Keys are just C-strings */
+									(GDestroyNotify)rspamd_dkim_sign_key_unref);
+					check_id = rspamd_symbols_cache_add_symbol (cfg->cache,
+							"DKIM_SIGN",
+							0,
+							dkim_sign_callback,
+							NULL,
+							SYMBOL_TYPE_CALLBACK|SYMBOL_TYPE_FINE,
+							-1);
+					msg_info_config ("init condition script for DKIM signing");
+
+					/*
+					 * Allow dkim signing to be executed only after dkim check
+					 */
+					if (cb_id > 0) {
+						rspamd_symbols_cache_add_delayed_dependency (cfg->cache,
+								"DKIM_SIGN", dkim_module_ctx->symbol_reject);
+					}
+
+					rspamd_config_add_metric_symbol (cfg, DEFAULT_METRIC,
+							"DKIM_SIGN", 0.0, "DKIM signature fake symbol",
+							"dkim", RSPAMD_SYMBOL_FLAG_IGNORE, 1);
+
+				}
+				else {
+					msg_err_config ("lua script must return "
+							"function(task) and not %s",
+							lua_typename (cfg->lua_state,
+									lua_type (cfg->lua_state, -1)));
+				}
+			}
+		}
 	}
 
 	return res;
@@ -543,6 +638,7 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 	GError *err = NULL;
 	struct raw_header *rh;
 	struct dkim_check_result *res = NULL, *cur;
+	guint checked = 0;
 	/* First check if a message has its signature */
 
 	hlist = rspamd_message_get_header (task,
@@ -640,6 +736,24 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 					DL_APPEND (res, cur);
 				}
 
+				if (dkim_module_ctx->skip_multi) {
+					if (hlist->next) {
+						msg_info_task ("message has multiple signatures but we"
+								" check only one as 'skip_multi' is set");
+					}
+
+					break;
+				}
+
+				checked ++;
+
+				if (checked > dkim_module_ctx->max_sigs) {
+					msg_info_task ("message has multiple signatures but we"
+							" stopped after %d checked signatures as limit"
+							" is reached", checked);
+					break;
+				}
+
 				hlist = g_list_next (hlist);
 			}
 		}
@@ -648,5 +762,106 @@ dkim_symbol_callback (struct rspamd_task *task, void *unused)
 	if (res != NULL) {
 		rspamd_session_watcher_push (task->s);
 		dkim_module_check (res);
+	}
+}
+
+static void
+dkim_sign_callback (struct rspamd_task *task, void *unused)
+{
+	lua_State *L;
+	struct rspamd_task **ptask;
+	gboolean sign = FALSE;
+	gint err_idx;
+	GString *tb, *hdr;
+	GError *err = NULL;
+	const gchar *selector = NULL, *domain = NULL, *key = NULL;
+	rspamd_dkim_sign_context_t *ctx;
+	rspamd_dkim_sign_key_t *dkim_key;
+
+	if (dkim_module_ctx->sign_condition_ref != -1) {
+		sign = FALSE;
+		L = task->cfg->lua_state;
+		lua_pushcfunction (L, &rspamd_lua_traceback);
+		err_idx = lua_gettop (L);
+
+		lua_rawgeti (L, LUA_REGISTRYINDEX, dkim_module_ctx->sign_condition_ref);
+		ptask = lua_newuserdata (L, sizeof (struct rspamd_task *));
+		*ptask = task;
+		rspamd_lua_setclass (L, "rspamd{task}", -1);
+
+		if (lua_pcall (L, 1, 1, err_idx) != 0) {
+			tb = lua_touserdata (L, -1);
+			msg_err_task ("call to user extraction script failed: %v", tb);
+			g_string_free (tb, TRUE);
+		}
+		else {
+			if (lua_istable (L, -1)) {
+				/*
+				 * Get the following elements:
+				 * - selector
+				 * - domain
+				 * - key
+				 */
+				if (!rspamd_lua_parse_table_arguments (L, -1, &err,
+						"*key=S;*domain=S;*selector=S",
+						&key, &domain, &selector)) {
+					msg_err_task ("invalid return value from sign condition: %e",
+							err);
+					g_error_free (err);
+
+					return;
+				}
+
+				dkim_key = rspamd_lru_hash_lookup (dkim_module_ctx->dkim_sign_hash,
+						key, time (NULL));
+
+				if (dkim_key == NULL) {
+					dkim_key = rspamd_dkim_sign_key_load (key, &err);
+
+					if (dkim_key == NULL) {
+						msg_err_task ("cannot load dkim key %s: %e",
+								key, err);
+						g_error_free (err);
+
+						return;
+					}
+
+					rspamd_lru_hash_insert (dkim_module_ctx->dkim_sign_hash,
+							g_strdup (key), dkim_key,
+							time (NULL), 0);
+				}
+
+				ctx = rspamd_create_dkim_sign_context (task, dkim_key,
+						DKIM_CANON_RELAXED, DKIM_CANON_RELAXED,
+						dkim_module_ctx->sign_headers, &err);
+
+				if (ctx == NULL) {
+					msg_err_task ("cannot create sign context: %e",
+							key, err);
+					g_error_free (err);
+
+					return;
+				}
+
+				hdr = rspamd_dkim_sign (task, selector, domain, 0, 0, ctx);
+
+				if (hdr) {
+					rspamd_mempool_set_variable (task->task_pool, "dkim-signature",
+							hdr, rspamd_gstring_free_hard);
+				}
+			}
+			else {
+				sign = FALSE;
+			}
+		}
+
+		/* Result + error function */
+		lua_settop (L, 0);
+
+		if (!sign) {
+			msg_debug_task ("skip signing as dkim condition callback returned"
+					" false");
+			return;
+		}
 	}
 }

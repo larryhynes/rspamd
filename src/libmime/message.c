@@ -112,6 +112,8 @@ process_raw_headers (struct rspamd_task *task, GHashTable *target,
 				rspamd_strlcpy (tmp, c, l + 1);
 				new->name = tmp;
 				new->empty_separator = TRUE;
+				new->raw_value = c;
+				new->raw_len = p - c; /* Including trailing ':' */
 				p++;
 				state = 2;
 				c = p;
@@ -214,6 +216,13 @@ process_raw_headers (struct rspamd_task *task, GHashTable *target,
 			/* Strip the initial spaces that could also be added by folding */
 			while (*tmp != '\0' && g_ascii_isspace (*tmp)) {
 				tmp ++;
+			}
+
+			if (p + 1 == end) {
+				new->raw_len = end - new->raw_value;
+			}
+			else {
+				new->raw_len = p - new->raw_value;
 			}
 
 			new->value = tmp;
@@ -1313,7 +1322,7 @@ rspamd_message_parse (struct rspamd_task *task)
 	struct received_header *recv, *trecv;
 	const gchar *p;
 	gsize len;
-	goffset hdr_pos;
+	goffset hdr_pos, body_pos;
 	gint i;
 	gdouble diff, *pdiff;
 	guint tw, *ptw, dw;
@@ -1409,11 +1418,12 @@ rspamd_message_parse (struct rspamd_task *task)
 			str.str = tmp->data;
 			str.len = tmp->len;
 
-			hdr_pos = rspamd_string_find_eoh (&str);
+			hdr_pos = rspamd_string_find_eoh (&str, &body_pos);
 
 			if (hdr_pos > 0 && hdr_pos < tmp->len) {
 				task->raw_headers_content.begin = (gchar *) (p);
-				task->raw_headers_content.len = (guint64) (hdr_pos);
+				task->raw_headers_content.len = hdr_pos;
+				task->raw_headers_content.body_start = p + body_pos;
 
 				if (task->raw_headers_content.len > 0) {
 					process_raw_headers (task, task->raw_headers,
