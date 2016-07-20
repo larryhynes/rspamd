@@ -584,6 +584,26 @@ LUA_FUNCTION_DEF (task, get_size);
  * - `broken_headers`: header data is broken for a message
  * @param {string} flag to set
  * @param {boolean} set set or clear flag (default is set)
+@example
+--[[
+For messages with undefined queue ID (scanned with rspamc or WebUI)
+do not include results into statistics and do not log task summary
+(it will not appear in the WebUI history as well).
+]]--
+
+-- Callback function to set flags
+local function no_log_stat_cb(task)
+  if not task:get_queue_id() then
+    task:set_flag('no_log')
+    task:set_flag('no_stat')
+  end
+end
+
+rspamd_config:register_symbol({
+  name = 'LOCAL_NO_LOG_STAT',
+  type = 'postfilter',
+  callback = no_log_stat_cb
+})
  */
 LUA_FUNCTION_DEF (task, set_flag);
 
@@ -2811,6 +2831,8 @@ lua_task_set_settings (lua_State *L)
 				}
 			}
 		}
+
+		rspamd_symbols_cache_process_settings (task, task->cfg->cache);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");

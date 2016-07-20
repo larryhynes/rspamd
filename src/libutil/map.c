@@ -1128,13 +1128,17 @@ static void
 rspamd_map_backend_dtor (struct rspamd_map_backend *bk)
 {
 	if (bk->protocol == MAP_PROTO_FILE) {
-		g_free (bk->data.fd->filename);
-		g_slice_free1 (sizeof (*bk->data.fd), bk->data.fd);
+		if (bk->data.fd) {
+			g_free (bk->data.fd->filename);
+			g_slice_free1 (sizeof (*bk->data.fd), bk->data.fd);
+		}
 	}
 	else {
-		g_free (bk->data.hd->host);
-		g_free (bk->data.hd->path);
-		g_slice_free1 (sizeof (*bk->data.hd), bk->data.hd);
+		if (bk->data.hd) {
+			g_free (bk->data.hd->host);
+			g_free (bk->data.hd->path);
+			g_slice_free1 (sizeof (*bk->data.hd), bk->data.hd);
+		}
 	}
 
 	g_slice_free1 (sizeof (*bk), bk);
@@ -1314,7 +1318,7 @@ rspamd_map_add_from_ucl (struct rspamd_config *cfg,
 
 	if (ucl_object_type (obj) == UCL_STRING) {
 		/* Just a plain string */
-		return rspamd_map_add (cfg, ucl_object_tostring (obj), NULL,
+		return rspamd_map_add (cfg, ucl_object_tostring (obj), description,
 				read_callback, fin_callback, user_data);
 	}
 

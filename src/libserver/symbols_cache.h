@@ -36,7 +36,9 @@ enum rspamd_symbol_type {
 	SYMBOL_TYPE_COMPOSITE = (1 << 5),
 	SYMBOL_TYPE_CLASSIFIER = (1 << 6),
 	SYMBOL_TYPE_FINE = (1 << 7),
-	SYMBOL_TYPE_EMPTY = (1 << 8) /* Allow execution on empty tasks */
+	SYMBOL_TYPE_EMPTY = (1 << 8), /* Allow execution on empty tasks */
+	SYMBOL_TYPE_PREFILTER = (1 << 9),
+	SYMBOL_TYPE_POSTFILTER = (1 << 10),
 };
 
 /**
@@ -140,7 +142,7 @@ guint rspamd_symbols_cache_symbols_count (struct symbols_cache *cache);
  * @param saved_item pointer to currently saved item
  */
 gboolean rspamd_symbols_cache_process_symbols (struct rspamd_task *task,
-	struct symbols_cache *cache);
+	struct symbols_cache *cache, gint stage);
 
 /**
  * Validate cache items agains theirs weights defined in metrics
@@ -220,4 +222,23 @@ struct rspamd_abstract_callback_data* rspamd_symbols_cache_get_cbdata (
 gboolean rspamd_symbols_cache_set_cbdata (struct symbols_cache *cache,
 		const gchar *symbol, struct rspamd_abstract_callback_data *cbdata);
 
+/**
+ * Process settings for task
+ * @param task
+ * @param cache
+ * @return
+ */
+gboolean rspamd_symbols_cache_process_settings (struct rspamd_task *task,
+		struct symbols_cache *cache);
+
+
+/**
+ * Checks if a symbol specified has been checked (or disabled)
+ * @param task
+ * @param cache
+ * @param symbol
+ * @return
+ */
+gboolean rspamd_symbols_cache_is_checked (struct rspamd_task *task,
+		struct symbols_cache *cache, const gchar *symbol);
 #endif

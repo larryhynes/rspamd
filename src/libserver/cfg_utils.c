@@ -876,7 +876,7 @@ rspamd_config_new_metric (struct rspamd_config *cfg, struct metric *c,
 		c = rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct metric));
 		c->grow_factor = 1.0;
 		c->symbols = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
-		c->groups = g_hash_table_new (rspamd_str_hash, rspamd_str_equal);
+		c->groups = g_hash_table_new (rspamd_strcase_hash, rspamd_strcase_equal);
 
 		for (i = METRIC_ACTION_REJECT; i < METRIC_ACTION_MAX; i++) {
 			c->actions[i].score = NAN;
@@ -1563,15 +1563,17 @@ rspamd_config_is_module_enabled (struct rspamd_config *cfg,
 		}
 	}
 
-	/* Now we check symbols group */
-	gr = g_hash_table_lookup (metric->groups, module_name);
+	if (metric) {
+		/* Now we check symbols group */
+		gr = g_hash_table_lookup (metric->groups, module_name);
 
-	if (gr) {
-		if (gr->disabled) {
-			msg_info_config ("%s module %s is disabled in the configuration as "
-					"its group has been disabled",
-					is_c ? "internal" : "lua", module_name);
-			return FALSE;
+		if (gr) {
+			if (gr->disabled) {
+				msg_info_config ("%s module %s is disabled in the configuration as "
+						"its group has been disabled",
+						is_c ? "internal" : "lua", module_name);
+				return FALSE;
+			}
 		}
 	}
 

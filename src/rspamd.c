@@ -388,6 +388,14 @@ systemd_get_socket (struct rspamd_main *rspamd_main, gint number)
 	struct stat st;
 	/* XXX: can we trust the current choice ? */
 	static const int sd_listen_fds_start = 3;
+	struct rspamd_worker_listen_socket *ls;
+
+	union {
+		struct sockaddr_storage ss;
+		struct sockaddr sa;
+	} addr_storage;
+	socklen_t slen = sizeof (addr_storage);
+	gint stype;
 
 	e = getenv ("LISTEN_FDS");
 	if (e != NULL) {
@@ -412,7 +420,34 @@ systemd_get_socket (struct rspamd_main *rspamd_main, gint number)
 
 			rspamd_socket_nonblocking (sock);
 
-			result = g_list_prepend (result, GINT_TO_POINTER (sock));
+			if (getsockname (sock, &addr_storage.sa, &slen) == -1) {
+				msg_warn_main ("cannot get name for systemd descriptor %d: %s",
+						sock, strerror (errno));
+				errno = EINVAL;
+				return NULL;
+			}
+
+			ls = g_slice_alloc0 (sizeof (*ls));
+			ls->addr = rspamd_inet_address_from_sa (&addr_storage.sa, slen);
+			ls->fd = sock;
+
+			slen = sizeof (stype);
+			if (getsockopt (sock, SOL_SOCKET, SO_TYPE, &stype, &slen) != -1) {
+				if (stype == SOCK_STREAM) {
+					ls->type = RSPAMD_WORKER_SOCKET_TCP;
+				}
+				else {
+					ls->type = RSPAMD_WORKER_SOCKET_UDP;
+				}
+			}
+			else {
+				msg_warn_main ("cannot get type for systemd descriptor %d: %s",
+						sock, strerror (errno));
+				ls->type = RSPAMD_WORKER_SOCKET_TCP;
+			}
+
+
+			result = g_list_prepend (result, ls);
 		}
 		else if (num_passed <= number) {
 			msg_err_main ("systemd LISTEN_FDS does not contain the expected fd: %d",
@@ -432,7 +467,7 @@ static inline uintptr_t
 make_listen_key (struct rspamd_worker_bind_conf *cf)
 {
 	rspamd_cryptobox_fast_hash_state_t st;
-	guint i, keylen;
+	guint i, keylen = 0;
 	guint8 *key;
 	rspamd_inet_addr_t *addr;
 	guint16 port;
@@ -446,7 +481,7 @@ make_listen_key (struct rspamd_worker_bind_conf *cf)
 		rspamd_cryptobox_fast_hash_update (&st, cf->name, strlen (cf->name));
 		for (i = 0; i < cf->cnt; i ++) {
 			addr = g_ptr_array_index (cf->addrs, i);
-			key = rspamd_inet_address_get_radix_key (
+			key = rspamd_inet_address_get_hash_key (
 					addr, &keylen);
 			rspamd_cryptobox_fast_hash_update (&st, key, keylen);
 			port = rspamd_inet_address_get_port (addr);

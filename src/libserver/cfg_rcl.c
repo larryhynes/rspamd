@@ -93,7 +93,7 @@ rspamd_rcl_logging_handler (rspamd_mempool_t *pool, const ucl_object_t *obj,
 	GError **err)
 {
 	const ucl_object_t *val;
-	const gchar *facility, *log_type, *log_level;
+	const gchar *facility = NULL, *log_type = NULL, *log_level = NULL;
 	struct rspamd_config *cfg = ud;
 
 	val = ucl_object_lookup (obj, "type");
@@ -1430,7 +1430,7 @@ rspamd_rcl_composite_handler (rspamd_mempool_t *pool,
 	}
 
 	composite =
-		rspamd_mempool_alloc (cfg->cfg_pool, sizeof (struct rspamd_composite));
+		rspamd_mempool_alloc0 (cfg->cfg_pool, sizeof (struct rspamd_composite));
 	composite->expr = expr;
 	composite->id = g_hash_table_size (cfg->composite_symbols);
 	g_hash_table_insert (cfg->composite_symbols,
@@ -1472,6 +1472,21 @@ rspamd_rcl_composite_handler (rspamd_mempool_t *pool,
 
 		rspamd_config_add_metric_symbol (cfg, metric, composite_name, score,
 				description, group, FALSE, FALSE);
+	}
+
+	val = ucl_object_lookup (obj, "policy");
+
+	if (val) {
+		composite->policy = rspamd_composite_policy_from_str (
+				ucl_object_tostring (val));
+
+		if (composite->policy == RSPAMD_COMPOSITE_POLICY_UNKNOWN) {
+			g_set_error (err,
+					CFG_RCL_ERROR,
+					EINVAL,
+					"composite %s has incorrect policy", composite_name);
+			return FALSE;
+		}
 	}
 
 	return TRUE;
@@ -1940,6 +1955,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg)
 			G_STRUCT_OFFSET (struct rspamd_config, ssl_ciphers),
 			0,
 			"List of ssl ciphers (e.g. HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4)");
+	rspamd_rcl_add_default_handler (sub,
+			"magic_file",
+			rspamd_rcl_parse_struct_string,
+			G_STRUCT_OFFSET (struct rspamd_config, magic_file),
+			0,
+			"Path to a custom libmagic file");
 	/* New DNS configuration */
 	ssub = rspamd_rcl_add_section_doc (&sub->subsections, "dns", NULL, NULL,
 			UCL_OBJECT, FALSE, TRUE,

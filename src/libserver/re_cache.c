@@ -109,6 +109,7 @@ struct rspamd_re_runtime {
 	guchar *results;
 	struct rspamd_re_cache *cache;
 	struct rspamd_re_cache_stat stat;
+	gboolean has_hs;
 };
 
 static GQuark
@@ -441,6 +442,9 @@ rspamd_re_cache_runtime_new (struct rspamd_re_cache *cache)
 	rt->checked = g_slice_alloc0 (NBYTES (cache->nre));
 	rt->results = g_slice_alloc0 (cache->nre);
 	rt->stat.regexp_total = cache->nre;
+#ifdef WITH_HYPERSCAN
+	rt->has_hs = cache->hyperscan_loaded;
+#endif
 
 	return rt;
 }
@@ -463,7 +467,7 @@ rspamd_re_cache_process_pcre (struct rspamd_re_runtime *rt,
 	const gchar *start = NULL, *end = NULL;
 	guint max_hits = rspamd_regexp_get_maxhits (re);
 	guint64 id = rspamd_regexp_get_cache_id (re);
-	gdouble t1, t2;
+	gdouble t1, t2, pr;
 	const gdouble slow_time = 0.1;
 
 	if (in == NULL) {
@@ -481,7 +485,11 @@ rspamd_re_cache_process_pcre (struct rspamd_re_runtime *rt,
 	r = rt->results[id];
 
 	if (max_hits == 0 || r < max_hits) {
-		t1 = rspamd_get_ticks ();
+		pr = rspamd_random_double_fast ();
+
+		if (pr > 0.9) {
+			t1 = rspamd_get_ticks ();
+		}
 
 		while (rspamd_regexp_search (re,
 				in,
@@ -505,11 +513,13 @@ rspamd_re_cache_process_pcre (struct rspamd_re_runtime *rt,
 			rt->stat.regexp_matched += r;
 		}
 
-		t2 = rspamd_get_ticks ();
+		if (pr > 0.9) {
+			t2 = rspamd_get_ticks ();
 
-		if (t2 - t1 > slow_time) {
-			msg_info_pool ("regexp '%16s' took %.2f seconds to execute",
-					rspamd_regexp_get_pattern (re), t2 - t1);
+			if (t2 - t1 > slow_time) {
+				msg_info_pool ("regexp '%16s' took %.2f seconds to execute",
+						rspamd_regexp_get_pattern (re), t2 - t1);
+			}
 		}
 	}
 
@@ -620,7 +630,8 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 	elt = g_ptr_array_index (rt->cache->re, re_id);
 	re_class = rspamd_regexp_get_class (re);
 
-	if (rt->cache->disable_hyperscan || elt->match_type == RSPAMD_RE_CACHE_PCRE) {
+	if (rt->cache->disable_hyperscan || elt->match_type == RSPAMD_RE_CACHE_PCRE ||
+			!rt->has_hs) {
 		for (i = 0; i < count; i++) {
 			ret = rspamd_re_cache_process_pcre (rt,
 					re,
@@ -1017,7 +1028,7 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 	}
 
 #if WITH_HYPERSCAN
-	if (!rt->cache->disable_hyperscan) {
+	if (!rt->cache->disable_hyperscan && rt->has_hs) {
 		rspamd_re_cache_finish_class (rt, re_class);
 	}
 #endif

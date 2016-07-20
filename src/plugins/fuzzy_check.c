@@ -102,6 +102,7 @@ struct fuzzy_ctx {
 	guint32 min_width;
 	guint32 io_timeout;
 	guint32 retransmits;
+	gboolean enabled;
 };
 
 struct fuzzy_client_session {
@@ -827,6 +828,8 @@ fuzzy_check_module_config (struct rspamd_config *cfg)
 	if (!rspamd_config_is_module_enabled (cfg, "fuzzy_check")) {
 		return TRUE;
 	}
+
+	fuzzy_module_ctx->enabled = TRUE;
 
 	if ((value =
 		rspamd_config_get_module_opt (cfg, "fuzzy_check", "symbol")) != NULL) {
@@ -2160,6 +2163,10 @@ fuzzy_symbol_callback (struct rspamd_task *task, void *unused)
 	GList *cur;
 	GPtrArray *commands;
 
+	if (!fuzzy_module_ctx->enabled) {
+		return;
+	}
+
 	/* Check whitelist */
 	if (fuzzy_module_ctx->whitelist) {
 		if (radix_find_compressed_addr (fuzzy_module_ctx->whitelist,
@@ -2189,6 +2196,10 @@ fuzzy_stat_command (struct rspamd_task *task)
 	GList *cur;
 	GPtrArray *commands;
 
+	if (!fuzzy_module_ctx->enabled) {
+		return;
+	}
+
 	cur = fuzzy_module_ctx->fuzzy_rules;
 	while (cur) {
 		rule = cur->data;
@@ -2200,7 +2211,7 @@ fuzzy_stat_command (struct rspamd_task *task)
 	}
 }
 
-static inline gboolean
+static inline gint
 register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 	struct fuzzy_rule *rule,
 	struct rspamd_task *task,
@@ -2213,7 +2224,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 	rspamd_inet_addr_t *addr;
 	struct rspamd_controller_session *session = entry->ud;
 	gint sock;
-	gboolean ret = FALSE;
+	gint ret = -1;
 
 	/* Get upstream */
 
@@ -2254,7 +2265,7 @@ register_fuzzy_controller_call (struct rspamd_http_connection_entry *entry,
 			event_add (&s->timev, &s->tv);
 
 			(*saved)++;
-			ret = TRUE;
+			ret = 1;
 		}
 	}
 
@@ -2412,6 +2423,18 @@ fuzzy_controller_handler (struct rspamd_http_connection_entry *conn_ent,
 {
 	const rspamd_ftok_t *arg;
 	glong value = 1, flag = 0;
+
+	if (!fuzzy_module_ctx->enabled) {
+		msg_err ("fuzzy_check module is not enabled");
+		rspamd_controller_send_error (conn_ent, 500, "Module disabled");
+		return 0;
+	}
+
+	if (fuzzy_module_ctx->fuzzy_rules == NULL) {
+		msg_err ("fuzzy_check module has no rules defined");
+		rspamd_controller_send_error (conn_ent, 500, "Module has no rules");
+		return 0;
+	}
 
 	/* Get size */
 	arg = rspamd_http_message_find_header (msg, "Weight");

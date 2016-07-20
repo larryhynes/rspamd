@@ -707,7 +707,7 @@
         });
 
         // @upload text
-        function uploadText(data, source) {
+        function uploadText(data, source, headers) {
             if (source === 'spam') {
                 var url = 'learnspam';
             }
@@ -715,7 +715,7 @@
                 var url = 'learnham';
             }
             else if (source == 'fuzzy') {
-                var url = 'learnfuzzy';
+                var url = 'fuzzyadd';
             }
             else if (source === 'scan') {
                 var url = 'scan';
@@ -727,6 +727,9 @@
                 url: url,
                 beforeSend: function (xhr) {
                     xhr.setRequestHeader('Password', getPassword());
+                    $.each(headers, function (name, value) {
+                        xhr.setRequestHeader(name, value);
+                    });
                 },
                 success: function (data) {
                     cleanTextUpload(source);
@@ -842,12 +845,12 @@
         $('[data-upload]').on('click', function () {
             var source = $(this).data('upload');
             var data;
+            var headers = {};
+            data = $('#' + source + 'TextSource').val();
             if (source == 'fuzzy') {
                 //To access the proper
-                data = new String($('#' + source + 'TextSource').val());
-                data.flag = $('#fuzzyFlagText').val();
-                data.weigth = $('#fuzzyWeightText').val();
-                data.string = data.toString();
+                headers.flag = $('#fuzzyFlagText').val();
+                headers.weigth = $('#fuzzyWeightText').val();
             }
             else {
                 data = $('#' + source + 'TextSource').val();
@@ -857,7 +860,7 @@
                     scanText(data);
                 }
                 else {
-                    uploadText(data, source);
+                    uploadText(data, source, headers);
                 }
             }
             return false;
@@ -880,7 +883,7 @@
                     // Order of sliders greylist -> probable spam -> spam
                     $('#actionsBody').empty();
                     $('#actionsForm').empty();
-                    items = [];
+                    var items = [];
                     var min = 0;
                     var max = Number.MIN_VALUE;
                     $.each(data, function (i, item) {
@@ -894,18 +897,23 @@
                             label = 'Greylist';
                             idx = 0;
                         }
-                        else if (item.action === 'reject') {
-                            label = 'Spam';
+                        else if (item.action === 'rewrite subject') {
+                            label = 'Rewrite subject';
                             idx = 2;
                         }
+                        else if (item.action === 'reject') {
+                            label = 'Spam';
+                            idx = 3;
+                        }
                         if (idx >= 0) {
-                            items[idx] =
-                                '<div class="form-group">' +
+                            items.push({idx: idx,
+                                html: '<div class="form-group">' +
                                     '<label class="control-label col-sm-2">' + label + '</label>' +
                                     '<div class="controls slider-controls col-sm-10">' +
                                     '<input class="slider" type="slider" value="' + item.value + '">' +
                                     '</div>' +
-                                    '</div>';
+                                    '</div>'
+                            });
                         }
                         if (item.value > max) {
                             max = item.value * 2;
@@ -915,7 +923,10 @@
                         }
                     });
 
-                    $('#actionsBody').html('<form id="actionsForm">' + items.join('') +
+                    items.sort(function(a, b) { return a.idx - b.idx; });
+
+                    $('#actionsBody').html('<form id="actionsForm">' +
+                        items.map(function(e) { return e.html; }).join('') +
                         '<br><div class="form-group">' +
                         '<button class="btn btn-primary" ' +
                         'type="submit">Save actions</button></div></form>');

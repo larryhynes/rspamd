@@ -925,7 +925,7 @@ rspamd_controller_handle_get_map (struct rspamd_http_connection_entry *conn_ent,
 
 	if (!rspamd_http_message_set_body_from_fd (reply, fd)) {
 		close (fd);
-		rspamd_http_message_free (reply);
+		rspamd_http_message_unref (reply);
 		msg_err_session ("cannot read map %s: %s", bk->uri, strerror (errno));
 		rspamd_controller_send_error (conn_ent, 500, "500 map read error");
 		return 0;
@@ -1041,7 +1041,7 @@ rspamd_controller_graph_point (gulong t, gulong step,
 
 		for (j = 0; j < step; j++) {
 			yval = acc[i + j * rrd_result->ds_count];
-			if (isnan(yval)) {
+			if (isnan (yval)) {
 				nan_cnt++;
 			}
 			else {
@@ -1081,7 +1081,7 @@ rspamd_controller_handle_graph (
 	struct rspamd_controller_worker_ctx *ctx;
 	rspamd_ftok_t srch, *value;
 	struct rspamd_rrd_query_result *rrd_result;
-	gulong i, j, k, start_row, cnt, t, ts, step;
+	gulong i, k, start_row, cnt, t, ts, step;
 	gdouble *acc;
 	ucl_object_t *res, *elt[4];
 	enum {
@@ -1170,24 +1170,25 @@ rspamd_controller_handle_graph (
 
 	/* Create window */
 	step = (rrd_result->rra_rows / desired_points + 0.5);
+	g_assert (step >= 1);
 	acc = g_malloc0 (sizeof (double) * rrd_result->ds_count * step);
 
 	for (i = start_row, cnt = 0; cnt < rrd_result->rra_rows;
 			cnt ++) {
-		for (j = 0; j < rrd_result->ds_count; j++) {
-			if (k < step) {
-				/* Just update window */
-				acc[k * rrd_result->ds_count + j] =
-						rrd_result->data[i * rrd_result->ds_count + j];
-				k ++;
-			}
-			else {
-				t = ts * rrd_result->pdp_per_cdp;
 
-				/* Need a fresh point */
-				rspamd_controller_graph_point (t, step, rrd_result, acc, elt);
-				k = 0;
-			}
+		memcpy (&acc[k * rrd_result->ds_count],
+				&rrd_result->data[i * rrd_result->ds_count],
+				sizeof (gdouble) * rrd_result->ds_count);
+
+		if (k < step - 1) {
+			k ++;
+		}
+		else {
+			t = ts * rrd_result->pdp_per_cdp;
+
+			/* Need a fresh point */
+			rspamd_controller_graph_point (t, step, rrd_result, acc, elt);
+			k = 0;
 		}
 
 		if (i == rrd_result->rra_rows - 1) {
@@ -2046,6 +2047,7 @@ rspamd_controller_handle_stat_common (
 	struct rspamd_task *task;
 	struct rspamd_stat_cbdata *cbdata;
 
+	memset (&mem_st, 0, sizeof (mem_st));
 	rspamd_mempool_stat (&mem_st);
 	memcpy (&stat_copy, session->ctx->worker->srv->stat, sizeof (stat_copy));
 	stat = &stat_copy;

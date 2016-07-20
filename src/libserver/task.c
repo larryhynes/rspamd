@@ -538,13 +538,6 @@ rspamd_task_select_processing_stage (struct rspamd_task *task, guint stages)
 	return RSPAMD_TASK_STAGE_DONE;
 }
 
-static gboolean
-rspamd_process_filters (struct rspamd_task *task)
-{
-	/* Process metrics symbols */
-	return rspamd_symbols_cache_process_symbols (task, task->cfg->cache);
-}
-
 gboolean
 rspamd_task_process (struct rspamd_task *task, guint stages)
 {
@@ -581,13 +574,13 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		break;
 
 	case RSPAMD_TASK_STAGE_PRE_FILTERS:
-		rspamd_lua_call_pre_filters (task);
+		rspamd_symbols_cache_process_symbols (task, task->cfg->cache,
+				RSPAMD_TASK_STAGE_PRE_FILTERS);
 		break;
 
 	case RSPAMD_TASK_STAGE_FILTERS:
-		if (!rspamd_process_filters (task)) {
-			ret = FALSE;
-		}
+		rspamd_symbols_cache_process_symbols (task, task->cfg->cache,
+				RSPAMD_TASK_STAGE_FILTERS);
 		break;
 
 	case RSPAMD_TASK_STAGE_CLASSIFIERS:
@@ -607,7 +600,9 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		break;
 
 	case RSPAMD_TASK_STAGE_POST_FILTERS:
-		rspamd_lua_call_post_filters (task);
+		rspamd_symbols_cache_process_symbols (task, task->cfg->cache,
+				RSPAMD_TASK_STAGE_POST_FILTERS);
+
 		if ((task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO) &&
 				!RSPAMD_TASK_IS_EMPTY (task) &&
 				!(task->flags & (RSPAMD_TASK_FLAG_LEARN_SPAM|RSPAMD_TASK_FLAG_LEARN_HAM))) {
@@ -625,6 +620,14 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 						task->cfg->lua_state, task->classifier,
 						st, &stat_error)) {
 
+					if (stat_error == NULL) {
+						g_set_error (&stat_error,
+								g_quark_from_static_string ("stat"), 500,
+								"Unknown statistics error");
+					}
+
+					msg_err_task ("learn error: %e", stat_error);
+
 					if (!(task->flags & RSPAMD_TASK_FLAG_LEARN_AUTO)) {
 						task->err = stat_error;
 					}
@@ -632,7 +635,6 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 						g_error_free (stat_error);
 					}
 
-					msg_err_task ("learn error: %e", stat_error);
 					task->processed_stages |= RSPAMD_TASK_STAGE_DONE;
 				}
 			}
@@ -673,9 +675,6 @@ rspamd_task_process (struct rspamd_task *task, guint stages)
 		/* Mark the current stage as done and go to the next stage */
 		msg_debug_task ("completed stage %d", st);
 		task->processed_stages |= st;
-
-		/* Reset checkpoint */
-		task->checkpoint = NULL;
 
 		/* Tail recursion */
 		return rspamd_task_process (task, stages);

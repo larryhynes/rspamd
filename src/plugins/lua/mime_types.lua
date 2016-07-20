@@ -31,12 +31,14 @@ local settings = {
   regexp = false,
   extension_map = { -- extension -> mime_type
     html = 'text/html',
+    htm = 'text/html',
     txt = 'text/plain',
     pdf = 'application/pdf'
   },
 
   bad_extensions = {
     scr = 4,
+    lnk = 4,
     exe = 1,
     jar = 2,
     com = 2,
@@ -88,7 +90,7 @@ local function check_mime_type(task)
           and not string.match(parts[#parts - 1], '^%d+$') then
           -- Double extension + bad extension == VERY bad
           task:insert_result(settings['symbol_double_extension'], badness_mult, {
-            parts[#parts - 1], ext
+            '.' .. parts[#parts - 1] .. '.' .. ext
           })
         else
           -- Just bad extension
@@ -208,13 +210,13 @@ if opts then
       map = rspamd_config:add_map ({
         url = settings['file'],
         type = 'regexp',
-        description = 'mime types map'
+        description = 'mime types map (regexps)'
       })
     else
       map = rspamd_config:add_map ({
         url = settings['file'],
         type = 'map',
-        description = 'mime types map'
+        description = 'mime types map (plain)'
       })
     end
     local id = rspamd_config:register_symbol({
