@@ -205,7 +205,7 @@ rspamd_is_encrypted_password (const gchar *password,
 					if (p->id == id) {
 						ret = TRUE;
 						if (pbkdf != NULL) {
-							*pbkdf = &pbkdf_list[0];
+							*pbkdf = &pbkdf_list[i];
 						}
 
 						break;
@@ -1275,11 +1275,26 @@ rspamd_controller_handle_history (struct rspamd_http_connection_entry *conn_ent,
 			ucl_object_insert_key (obj,
 				ucl_object_fromstring (rspamd_action_to_str (
 					row->action)), "action", 0, false);
-			ucl_object_insert_key (obj, ucl_object_fromdouble (
-					row->score),		  "score",			0, false);
-			ucl_object_insert_key (obj,
-				ucl_object_fromdouble (
-					row->required_score), "required_score", 0, false);
+
+			if (!isnan (row->score)) {
+				ucl_object_insert_key (obj, ucl_object_fromdouble (
+						row->score),		  "score",			0, false);
+			}
+			else {
+				ucl_object_insert_key (obj,
+						ucl_object_fromdouble (0.0), "score", 0, false);
+			}
+
+			if (!isnan (row->required_score)) {
+				ucl_object_insert_key (obj,
+						ucl_object_fromdouble (
+								row->required_score), "required_score", 0, false);
+			}
+			else {
+				ucl_object_insert_key (obj,
+						ucl_object_fromdouble (0.0), "required_score", 0, false);
+			}
+
 			ucl_object_insert_key (obj, ucl_object_fromstring (
 					row->symbols),		  "symbols",		0, false);
 			ucl_object_insert_key (obj,	   ucl_object_fromint (

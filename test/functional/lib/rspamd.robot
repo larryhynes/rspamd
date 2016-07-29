@@ -17,7 +17,9 @@ Check Rspamc
   \  ...  ELSE  Check Rspamc Match String  ${result.stdout}  ${i}  ${inverse}
   Run Keyword If  @{args} == @{EMPTY}  Check Rspamc Match Default  ${result.stdout}  ${inverse}
   ${rc_nocheck} =  Evaluate  'rc_nocheck' in $kwargs
+  ${rc_noinverse} =  Evaluate  'rc_noinverse' in $kwargs
   Run Keyword If  ${rc_nocheck} == True  Return From Keyword
+  ${inverse} =  Set Variable If  ${rc_noinverse} == True  False  ${inverse}
   Run Keyword If  ${inverse} == False  Should Be Equal As Integers  ${result.rc}  ${rc}
   ...  ELSE  Should Not Be Equal As Integers  ${result.rc}  ${rc}
 
@@ -62,7 +64,7 @@ Generic Setup
   ...  ELSE  Fail  'RSPAMD_SCOPE must be Test or Suite'
 
 Generic Teardown
-  Shutdown Process  ${RSPAMD_PID}
+  Shutdown Process With Children  ${RSPAMD_PID}
   Cleanup Temporary Directory  ${TMPDIR}
 
 Log Logs
@@ -106,7 +108,7 @@ Run Rspamd
   Log  ${config}
   Create File  ${TMPDIR}/rspamd.conf  ${config}
   ${result} =  Run Process  ${RSPAMD}  -u  ${RSPAMD_USER}  -g  ${RSPAMD_GROUP}
-  ...  -c  ${TMPDIR}/rspamd.conf  env:LD_LIBRARY_PATH=${TESTDIR}/../../contrib/aho-corasick
+  ...  -c  ${TMPDIR}/rspamd.conf  DBDIR\=${TMPDIR}  env:TMPDIR=${TMPDIR}  env:LD_LIBRARY_PATH=${TESTDIR}/../../contrib/aho-corasick
   Run Keyword If  ${result.rc} != 0  Log  ${result.stderr}
   ${rspamd_logpos} =  Log Logs  ${TMPDIR}/rspamd.log  0
   Should Be Equal As Integers  ${result.rc}  0
@@ -115,8 +117,8 @@ Run Rspamd
   [Return]  ${TMPDIR}  ${rspamd_pid}  ${rspamd_logpos}
 
 Scan Message With Rspamc
-  [Arguments]  ${msg_file}
-  ${result} =  Run Rspamc  -p  -h  ${LOCAL_ADDR}:${PORT_NORMAL}  ${msg_file}
+  [Arguments]  ${msg_file}  @{vargs}
+  ${result} =  Run Rspamc  -p  -h  ${LOCAL_ADDR}:${PORT_NORMAL}  @{vargs}  ${msg_file}
   [Return]  ${result}
 
 Sync Fuzzy Storage

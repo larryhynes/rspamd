@@ -1012,7 +1012,7 @@ process_text_part (struct rspamd_task *task,
 		mres = rspamd_create_metric_result (task, DEFAULT_METRIC);
 
 		if (mres != NULL) {
-			mres->score = mres->metric->actions[METRIC_ACTION_REJECT].score;
+			mres->score = rspamd_task_get_required_score (task, mres);
 			mres->action = METRIC_ACTION_REJECT;
 		}
 
@@ -1522,7 +1522,7 @@ rspamd_message_parse (struct rspamd_task *task)
 				need_recv_correction = TRUE;
 			}
 			else if (!(task->flags & RSPAMD_TASK_FLAG_NO_IP) && task->from_addr) {
-				if (raddr) {
+				if (!raddr) {
 					need_recv_correction = TRUE;
 				}
 				else {

@@ -212,21 +212,13 @@ rspamd_sqlite3_wait (rspamd_mempool_t *pool, const gchar *lock)
 		.tv_nsec = 1000000
 	};
 
-	fd = open (lock, O_RDONLY);
+	while ((fd = open (lock, O_WRONLY|O_CREAT|O_EXCL, 00600)) == -1) {
+		if (errno != EBUSY && errno != EEXIST) {
+			msg_err_pool_check ("cannot open lock file %s: %s", lock,
+					strerror (errno));
 
-	if (fd == -1) {
-
-		if (errno == ENOENT) {
-			/* Lock is already released, so we can continue */
-			return TRUE;
+			return FALSE;
 		}
-
-		msg_err_pool_check ("cannot open lock file %s: %s", lock, strerror (errno));
-
-		return FALSE;
-	}
-
-	while (!rspamd_file_lock (fd, TRUE)) {
 		if (nanosleep (&sleep_ts, NULL) == -1 && errno != EINTR) {
 			close (fd);
 			msg_err_pool_check ("cannot sleep open lock file %s: %s", lock,
@@ -236,7 +228,6 @@ rspamd_sqlite3_wait (rspamd_mempool_t *pool, const gchar *lock)
 		}
 	}
 
-	rspamd_file_unlock (fd, FALSE);
 	unlink (lock);
 	close (fd);
 
@@ -349,9 +340,21 @@ rspamd_sqlite3_open_or_create (rspamd_mempool_t *pool, const gchar *path, const
 	}
 
 	if (create && has_lock) {
-		if (sqlite3_exec (sqlite, sqlite_wal, NULL, NULL, NULL) != SQLITE_OK) {
+		while ((rc = sqlite3_exec (sqlite, sqlite_wal, NULL, NULL, NULL)) != SQLITE_OK) {
+			if (rc == SQLITE_BUSY) {
+				struct timespec sleep_ts = {
+						.tv_sec = 0,
+						.tv_nsec = 1000000
+				};
+
+				nanosleep (&sleep_ts, NULL);
+
+				continue;
+			}
+
 			msg_warn_pool_check ("WAL mode is not supported (%s), locking issues might occur",
 					sqlite3_errmsg (sqlite));
+			break;
 		}
 
 		if (sqlite3_exec (sqlite, exclusive_lock_sql, NULL, NULL, NULL) != SQLITE_OK) {
@@ -360,7 +363,18 @@ rspamd_sqlite3_open_or_create (rspamd_mempool_t *pool, const gchar *path, const
 		}
 
 		if (create_sql) {
-			if (sqlite3_exec (sqlite, create_sql, NULL, NULL, NULL) != SQLITE_OK) {
+			while ((rc = sqlite3_exec (sqlite, create_sql, NULL, NULL, NULL)) != SQLITE_OK) {
+				if (rc == SQLITE_BUSY) {
+					struct timespec sleep_ts = {
+							.tv_sec = 0,
+							.tv_nsec = 1000000
+					};
+
+					nanosleep (&sleep_ts, NULL);
+
+					continue;
+				}
+
 				g_set_error (err, rspamd_sqlite3_quark (),
 						-1, "cannot execute create sql `%s`: %s",
 						create_sql, sqlite3_errmsg (sqlite));

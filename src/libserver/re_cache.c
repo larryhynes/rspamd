@@ -1318,7 +1318,7 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 	GHashTableIter it, cit;
 	gpointer k, v;
 	struct rspamd_re_class *re_class;
-	gchar path[PATH_MAX];
+	gchar path[PATH_MAX], npath[PATH_MAX];
 	hs_database_t *test_db;
 	gint fd, i, n, *hs_ids = NULL, pcre_flags, re_flags;
 	guint64 crc;
@@ -1371,6 +1371,8 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 			continue;
 		}
 
+		rspamd_snprintf (path, sizeof (path), "%s%c%s.hs.new", cache_dir,
+						G_DIR_SEPARATOR, re_class->hash);
 		fd = open (path, O_CREAT|O_TRUNC|O_EXCL|O_WRONLY, 00600);
 
 		if (fd == -1) {
@@ -1471,6 +1473,7 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 				g_free (hs_ids);
 				g_free (hs_pats);
 				close (fd);
+				unlink (path);
 				hs_free_compile_error (hs_errors);
 
 				return -1;
@@ -1487,6 +1490,7 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 						re_class->hash);
 
 				close (fd);
+				unlink (path);
 				g_free (hs_ids);
 				g_free (hs_flags);
 				hs_free_database (test_db);
@@ -1514,6 +1518,7 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 			else {
 				iov[0].iov_base = (void *) rspamd_hs_magic;
 			}
+
 			iov[0].iov_len = RSPAMD_HS_MAGIC_LEN;
 			iov[1].iov_base = &cache->plt;
 			iov[1].iov_len = sizeof (cache->plt);
@@ -1535,6 +1540,7 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 						"cannot serialize tree of regexp to %s: %s",
 						path, strerror (errno));
 				close (fd);
+				unlink (path);
 				g_free (hs_ids);
 				g_free (hs_flags);
 				g_free (hs_serialized);
@@ -1564,6 +1570,24 @@ rspamd_re_cache_compile_hyperscan (struct rspamd_re_cache *cache,
 			g_free (hs_serialized);
 			g_free (hs_ids);
 			g_free (hs_flags);
+		}
+
+		fsync (fd);
+
+		/* Now rename temporary file to the new .hs file */
+		rspamd_snprintf (npath, sizeof (path), "%s%c%s.hs", cache_dir,
+				G_DIR_SEPARATOR, re_class->hash);
+
+		if (rename (path, npath) == -1) {
+			g_set_error (err,
+					rspamd_re_cache_quark (),
+					errno,
+					"cannot rename %s to %s: %s",
+					path, npath, strerror (errno));
+			unlink (path);
+			close (fd);
+
+			return -1;
 		}
 
 		close (fd);

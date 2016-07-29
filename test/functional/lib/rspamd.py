@@ -1,6 +1,7 @@
 import grp
 import os
 import os.path
+import psutil
 import pwd
 import shutil
 import signal
@@ -23,15 +24,45 @@ def cleanup_temporary_directory(directory):
 def encode_filename(filename):
     return "".join(['%%%0X' % ord(b) for b in filename])
 
+def get_process_children(pid):
+    children = []
+    for p in psutil.process_iter():
+        # ppid could be int or function depending on library version
+        if callable(p.ppid):
+            ppid = p.ppid()
+        else:
+            ppid = p.ppid
+        if ppid == pid:
+            children.append(p.pid)
+    return children
+
 def get_test_directory():
-    return os.path.abspath(os.path.dirname(os.path.realpath(__file__)) + "../..")
+    return os.path.abspath(os.path.dirname(os.path.realpath(__file__)) + "../../")
+
+def get_top_dir():
+    if os.environ.get('RSPAMD_TOPDIR'):
+        return os.environ['RSPAMD_TOPDIR']
+
+    return get_test_directory() + "/../../"
+
+def get_rspamd():
+    if os.environ.get('RSPAMD'):
+        return os.environ['RSPAMD']
+    dname = get_top_dir()
+    return dname + "/src/rspamd"
+def get_rspamc():
+    if os.environ.get('RSPAMC'):
+        return os.environ['RSPAMC']
+    dname = get_top_dir()
+    return dname + "/src/client/rspamc"
+def get_rspamadm():
+    if os.environ.get('RSPAMADM'):
+        return environ['RSPAMADM']
+    dname = get_top_dir()
+    return dname + "/src/rspamadm/rspamadm"
 
 def make_temporary_directory():
     return tempfile.mkdtemp()
-
-def process_should_exist(pid):
-    pid = int(pid)
-    os.kill(pid, 0)
 
 def read_log_from_position(filename, offset):
     offset = long(offset)
@@ -62,9 +93,10 @@ def Send_SIGUSR1(pid):
     os.kill(pid, signal.SIGUSR1)
 
 def set_directory_ownership(path, username, groupname):
-    uid=pwd.getpwnam(username).pw_uid
-    gid=grp.getgrnam(groupname).gr_gid
-    os.chown(path, uid, gid)
+    if os.getuid() == 0:
+        uid=pwd.getpwnam(username).pw_uid
+        gid=grp.getgrnam(groupname).gr_gid
+        os.chown(path, uid, gid)
 
 def spamc(addr, port, filename):
     goo = open(filename, 'rb').read()
@@ -83,14 +115,28 @@ def update_dictionary(a, b):
     return a
 
 def shutdown_process(pid):
-    pid = int(pid)
-    process_should_exist(pid)
     i = 0
     while i < 100:
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError as e:
             assert e.errno == 3
-            break
+            return
         i += 1
         time.sleep(0.1)
+    while i < 200:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError as e:
+            assert e.errno == 3
+            return
+        i += 1
+        time.sleep(0.1)
+    assert False, "Failed to shutdown process %s" % pid
+
+def shutdown_process_with_children(pid):
+    pid = int(pid)
+    children = get_process_children(pid)
+    shutdown_process(pid)
+    for child in children:
+        shutdown_process(child)

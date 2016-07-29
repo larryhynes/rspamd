@@ -21,6 +21,7 @@ local rspamd_logger = require "rspamd_logger"
 local cdb = require "rspamd_cdb"
 local util = require "rspamd_util"
 local regexp = require "rspamd_regexp"
+local rspamd_expression = require "rspamd_expression"
 require "fun" ()
 
 local urls = {}
@@ -29,7 +30,9 @@ local function ip_to_rbl(ip, rbl)
   return table.concat(ip:inversed_str_octets(), ".") .. '.' .. rbl
 end
 
-local function multimap_callback(task, pre_filter)
+local function multimap_callback(task, rule)
+  local pre_filter = rule['prefilter']
+
   -- Applies specific filter for input
   local function apply_filter(filter, input, rule)
     if filter == 'email:addr' or filter == 'email' then
@@ -95,6 +98,61 @@ local function multimap_callback(task, pre_filter)
     return ret
   end
 
+  -- Parse result in form: <symbol>:<score>|<symbol>|<score>
+  local function parse_ret(ret)
+    if ret and type(ret) == 'string' then
+      local lpeg = require "lpeg"
+      local number = {}
+
+      local digit = lpeg.R("09")
+      number.integer =
+        (lpeg.S("+-") ^ -1) *
+        (digit   ^  1)
+
+      -- Matches: .6, .899, .9999873
+      number.fractional =
+        (lpeg.P(".")   ) *
+        (digit ^ 1)
+
+      -- Matches: 55.97, -90.8, .9
+      number.decimal =
+        (number.integer *              -- Integer
+        (number.fractional ^ -1)) +    -- Fractional
+        (lpeg.S("+-") * number.fractional)  -- Completely fractional number
+
+      local sym_start = lpeg.R("az", "AZ") + lpeg.S("_")
+      local sym_elt = sym_start + lpeg.R("09")
+      local symbol = sym_start * sym_elt ^0
+      local symbol_cap = lpeg.Cg(symbol, 'symbol')
+      local score_cap = lpeg.Cg(number.decimal, 'score')
+      local symscore_cap = (symbol_cap * lpeg.P(":") * score_cap)
+      local grammar = symscore_cap + symbol_cap + score_cap
+      local parser = lpeg.Ct(grammar)
+      local tbl = parser:match(ret)
+
+      if tbl then
+        local sym = nil
+        local score = 1.0
+
+        if tbl['symbol'] then
+          sym = tbl['symbol']
+        end
+        if tbl['score'] then
+          score = tbl['score']
+        end
+
+        return true,sym,score
+      else
+        rspamd_logger.infox(task, 'cannot parse %s', ret)
+        return true,nil,1.0
+      end
+    elseif type(ret) == 'boolean' then
+      return ret,nil,0.0
+    end
+
+    return false,nil,0.0
+  end
+
   -- Match a single value for against a single rule
   local function match_rule(r, value)
     local ret = false
@@ -106,7 +164,17 @@ local function multimap_callback(task, pre_filter)
     ret = match_element(r, value)
 
     if ret then
-      task:insert_result(r['symbol'], 1)
+      local res,symbol,score = parse_ret(ret)
+      if symbol then
+        if not r['symbols_set'][symbol] then
+          rspamd_logger.infox(task, 'symbol %s is not registered for map %s, replace it with just %s',
+            symbol, r['symbol'], r['symbol'])
+          symbol = r['symbol']
+        end
+      else
+        symbol = r['symbol']
+      end
+      task:insert_result(symbol, score)
 
       if pre_filter then
         task:set_pre_result(r['action'], 'Matched map: ' .. r['symbol'])
@@ -345,121 +413,86 @@ local function multimap_callback(task, pre_filter)
     end
   end
 
-  -- IP rules
-  local ip = task:get_from_ip()
-  if ip:is_valid() then
-    each(function(r) match_rule(r, ip) end,
-      filter(function(r)
-        return pre_filter == r['prefilter'] and r['type'] == 'ip'
-      end, rules))
-  end
+  if rule['expression'] then
+    local res,trace = rule['expression']:process_traced(task)
 
-  -- Header rules
-  each(function(r)
-    local hv = task:get_header_full(r['header'])
-    match_list(r, hv, {'decoded'})
-  end,
-  filter(function(r)
-    return pre_filter == r['prefilter'] and r['type'] == 'header'
-  end, rules))
-
-  -- Rcpt rules
-  if task:has_recipients() then
-    local rcpts = task:get_recipients()
-    each(function(r)
-      match_addr(r, rcpts)
-    end,
-    filter(function(r)
-      return pre_filter == r['prefilter'] and r['type'] == 'rcpt'
-    end, rules))
-  end
-
-  -- From rules
-  if task:has_from() then
-    local from = task:get_from()
-    if from then
-      each(function(r)
-        match_addr(r, from)
-      end,
-      filter(function(r)
-        return pre_filter == r['prefilter'] and r['type'] == 'from'
-      end, rules))
+    if not res or res == 0 then
+      rspamd_logger.debugx(task, 'condition is false for %s', rule['symbol'])
+      return
+    else
+      rspamd_logger.debugx(task, 'condition is true for %s: %s', rule['symbol'],
+        trace)
     end
   end
-  -- URL rules
-  if task:has_urls() then
-    local urls = task:get_urls()
-    for i,url in ipairs(urls) do
-      each(function(r)
-        match_url(r, url)
-      end,
-      filter(function(r)
-        return pre_filter == r['prefilter'] and r['type'] == 'url'
-      end, rules))
-    end
-  end
-  -- Filename rules
-  local function check_file(fn)
-    each(function(r)
-          match_filename(r, fn)
-        end,
-        filter(function(r)
-          return pre_filter == r['prefilter'] and r['type'] == 'filename'
-        end, rules))
-  end
-  -- Body rules
-  each(function(r)
-    match_content(r)
-  end,
-  filter(function(r)
-    return pre_filter == r['prefilter'] and r['type'] == 'content'
-  end, rules))
 
-  local parts = task:get_parts()
-  for i,p in ipairs(parts) do
-    if p:is_archive() then
-      local fnames = p:get_archive():get_files()
-
-      for ii,fn in ipairs(fnames) do
-        check_file(fn)
-      end
-    end
-
-    local fn = p:get_filename()
-    if fn then
-      check_file(fn)
-    end
-  end
-  -- RBL rules
-  if ip:is_valid() then
-    each(function(r)
+  local rt = rule['type']
+  if rt == 'ip' or rt == 'dnsbl' then
+    local ip = task:get_from_ip()
+    if ip:is_valid() then
+      if rt == 'ip' then
+        match_rule(rule, ip)
+      else
         local cb = function (resolver, to_resolve, results, err, rbl)
           if results then
-            task:insert_result(r['symbol'], 1, r['map'])
+            task:insert_result(rule['symbol'], 1, rule['map'])
 
             if pre_filter then
-              task:set_pre_result(r['action'], 'Matched map: ' .. r['symbol'])
+              task:set_pre_result(rule['action'], 'Matched map: ' .. rule['symbol'])
             end
           end
         end
 
         task:get_resolver():resolve_a({task = task,
-          name = ip_to_rbl(ip, r['map']),
+          name = ip_to_rbl(ip, rule['map']),
           callback = cb,
-          })
-      end,
-    filter(function(r)
-      return pre_filter == r['prefilter'] and r['type'] == 'dnsbl'
-    end, rules))
+        })
+      end
+    end
+  elseif rt == 'header' then
+    local hv = task:get_header_full(rule['header'])
+    match_list(rule, hv, {'decoded'})
+  elseif rt == 'rcpt' then
+    if task:has_recipients('smtp') then
+      local rcpts = task:get_recipients('smtp')
+      match_addr(rule, rcpts)
+    end
+  elseif rt == 'from' then
+    if task:has_from('smtp') then
+      local from = task:get_from('smtp')
+      match_addr(rule, from)
+    end
+  elseif rt == 'url' then
+    if task:has_urls() then
+      local urls = task:get_urls()
+      for i,url in ipairs(urls) do
+        match_url(rule, url)
+      end
+    end
+  elseif rt == 'filename' then
+    local parts = task:get_parts()
+    for i,p in ipairs(parts) do
+      if p:is_archive() then
+        local fnames = p:get_archive():get_files()
+
+        for ii,fn in ipairs(fnames) do
+          match_filename(rule, fn)
+        end
+      end
+
+      local fn = p:get_filename()
+      if fn then
+        match_filename(rule, fn)
+      end
+    end
+  elseif rt == 'content' then
+    match_content(rule)
   end
 end
 
-local function multimap_filter_callback(task)
-  multimap_callback(task, false)
-end
-
-local function multimap_prefilter_callback(task)
-  multimap_callback(task, true)
+local function gen_multimap_callback(rule)
+  return function(task)
+    multimap_callback(task, rule)
+  end
 end
 
 local function add_multimap_rule(key, newrule)
@@ -537,7 +570,7 @@ local function add_multimap_rule(key, newrule)
           newrule['hash'] = rspamd_config:add_map ({
             url = newrule['map'],
             description = newrule['description'],
-            type = 'set'
+            type = 'hash'
           })
         end
         if newrule['hash'] then
@@ -564,6 +597,40 @@ local function add_multimap_rule(key, newrule)
   end
 
   if ret then
+    if newrule['require_symbols'] and not newrule['prefilter'] then
+      local atoms = {}
+
+      local function parse_atom(str)
+        local atom = table.concat(totable(take_while(function(c)
+          if string.find(', \t()><+!|&\n', c) then
+            return false
+          end
+          return true
+        end, iter(str))), '')
+        table.insert(atoms, atom)
+
+        return atom
+      end
+
+      local function process_atom(atom, task)
+        local ret = task:has_symbol(atom)
+        rspamd_logger.debugx('check for symbol %s: %s', atom, ret)
+
+        if ret then
+          return 1
+        end
+
+        return 0
+      end
+
+      local expression = rspamd_expression.create(newrule['require_symbols'],
+        {parse_atom, process_atom}, rspamd_config:get_mempool())
+      if expression then
+        newrule['expression'] = expression
+        each(function(v) rspamd_config:register_dependency(newrule['symbol'], v) end,
+          atoms)
+      end
+    end
     return newrule
   end
 
@@ -587,26 +654,50 @@ if opts and type(opts) == 'table' then
   end
   -- add fake symbol to check all maps inside a single callback
   if any(function(r) return not r['prefilter'] end, rules) then
-    local id = rspamd_config:register_symbol({
-      type = 'callback',
-      priority = -1,
-      callback = multimap_filter_callback,
-      flags = 'empty'
-    })
     for i,rule in ipairs(rules) do
-      rspamd_config:register_symbol({
-        type = 'virtual',
+      local id = rspamd_config:register_symbol({
+        type = 'normal',
         name = rule['symbol'],
-        parent = id,
+        callback = gen_multimap_callback(rule),
       })
+      if rule['symbols'] then
+        -- Find allowed symbols by this map
+        rule['symbols_set'] = {}
+        each(function(s)
+          rspamd_config:register_symbol({
+            type = 'virtual',
+            name = s,
+            parent = id
+          })
+          rule['symbols_set'][s] = 1
+        end, rule['symbols'])
+      end
+      if rule['score'] then
+        -- Register metric symbol
+        local description = 'multimap symbol'
+        local group = 'multimap'
+        if rule['description'] then
+          description = rule['description']
+        end
+        if rule['group'] then
+          group = rule['group']
+        end
+        rspamd_config:set_metric_symbol({
+            name = rule['symbol'],
+            score = rule['score'],
+            description = description,
+            group = group
+        })
+      end
     end
   end
 
-  if any(function(r) return r['prefilter'] end, rules) then
+  each(function(r)
     rspamd_config:register_symbol({
       type = 'prefilter',
-      name = 'MULTIMAP_PREFILTERS',
-      callback = multimap_prefilter_callback
+      name = r['symbol'],
+      callback = gen_multimap_callback(r),
     })
-  end
+  end,
+  filter(function(r) return r['prefilter'] end, rules))
 end
