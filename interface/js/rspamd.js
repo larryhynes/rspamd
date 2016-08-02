@@ -169,6 +169,7 @@
             $('#listMaps').empty();
             $('#historyLog tbody').remove();
             $('#modalBody').empty();
+            password = '';
         }
         function isLogged() {
             if (!supportsSessionStorage()) {
@@ -908,7 +909,7 @@
                                 html: '<div class="form-group">' +
                                     '<label class="control-label col-sm-2">' + label + '</label>' +
                                     '<div class="controls slider-controls col-sm-10">' +
-                                    '<input class="slider" type="slider" value="' + item.value + '">' +
+                                    '<input class="slider" type="slider" value="' + item.value + '" id="' + item.action + '">' +
                                     '</div>' +
                                     '</div>'
                             });
@@ -937,9 +938,9 @@
             var url = 'saveactions';
             var values = [];
             // Rspamd order: [spam,probable_spam,greylist]
-            values[0] = parseFloat(inputs[2].value);
-            values[1] = parseFloat(inputs[1].value);
-            values[2] = parseFloat(inputs[0].value);
+            values[0] = parseFloat(document.getElementById('reject').value);
+            values[1] = parseFloat(document.getElementById('add header').value);
+            values[2] = parseFloat(document.getElementById('greylist').value);
             $.ajax({
                 data: JSON.stringify(values),
                 dataType: 'json',
@@ -1052,6 +1053,7 @@
             $(document).on('submit', '#connectForm', function (e) {
                 e.preventDefault();
                 var password = $('#connectPassword').val();
+                document.getElementById('connectPassword').value = '';
                 $.ajax({
                     global: false,
                     dataType: 'json',
