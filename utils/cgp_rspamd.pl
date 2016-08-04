@@ -20,7 +20,6 @@ my $reject_message = "Spam message rejected";
 GetOptions(
   "host=s" => \$rspamd_host,
   "header=s" => \$header,
-  "local" => \$local,
   "reject-message=s" => \$reject_message,
   "help|?" => \$help,
   "man" => \$man
@@ -28,6 +27,10 @@ GetOptions(
 
 pod2usage(1) if $help;
 pod2usage(-exitval => 0, -verbose => 2) if $man;
+
+my $scanned = 0;
+# Turn off bufferization as required by CGP
+$| = 1;
 
 sub cgp_string {
   my ($in) = @_;
@@ -47,6 +50,7 @@ sub rspamd_scan {
 
     if ($hdr->{Status} =~ /^2/) {
       my $js = decode_json($body);
+      $scanned ++;
 
       if (!$js) {
         print "* Rspamd: Bad response for $file: invalid JSON: parse error\n";
@@ -95,13 +99,51 @@ sub rspamd_scan {
 
   if ($local) {
     # Use file scan
+    # XXX: not implemented now due to CGP queue format
     http_get("http://$rspamd_host/symbols?file=$file", $http_callback);
   }
   else {
     aio_load($file, sub {
       my ($data) = @_ or return print "* Cannot open $file: $!\n$tag FAILURE\n";
 
-      http_post("http://$rspamd_host/symbols", $data, $http_callback);
+      # Parse CGP format
+      $data =~ s/^((?:[^\n]*\n)*?)\n(.*)$/$2/ms;
+      my @envelope = split /\n/, $1;
+      chomp(@envelope);
+      my $from;
+      my @rcpts;
+      my $ip;
+
+      foreach my $elt (@envelope) {
+        if ($elt =~ /^P\s[^<]*(<[^>]*>).*$/) {
+          $from = $1;
+        }
+        elsif ($elt =~ /^R\s[^<]*(<[^>]*>).*$/) {
+          push @rcpts, $1;
+        }
+        elsif ($elt =~ /^S .*\[(.+)\]/) {
+          $ip = $1;
+        }
+      }
+
+      my $headers = {};
+      if ($file =~ /\/([^\/.]+)\.msg$/) {
+        $headers->{'Queue-ID'} = $1;
+      }
+      if ($from) {
+        $headers->{From} = $from;
+      }
+      if (scalar(@rcpts) > 0) {
+        # XXX: Anyevent cannot parse headers with multiple values
+        foreach (@rcpts) {
+          $headers->{Rcpt} = $_;
+        }
+      }
+      if ($ip) {
+        $headers->{IP} = $ip;
+      }
+
+      http_post("http://$rspamd_host/symbols", $data, headers => $headers, $http_callback);
     });
   }
 }
@@ -126,6 +168,11 @@ my $w = AnyEvent->io(
         print "* Scanning file $file\n";
         rspamd_scan $tag, $file;
       }
+      elsif ($cmd eq "QUIT") {
+        print "* Terminating after scanning of $scanned files\n";
+        print "$tag OK\n";
+        exit 0;
+      }
     }
   }
 );
@@ -144,7 +191,6 @@ cgp_rspamd [options]
 
  Options:
    --host=hostport        Rspamd host to connect (localhost:11333 by default)
-   --local                Rspamd runs locally and can access CGP files (false by default)
    --header               Add specific header for a spam message ("X-Spam: yes" by default)
    --reject-message       Rejection message for spam mail ("Spam message rejected" by default)
    --help                 brief help message
@@ -157,10 +203,6 @@ cgp_rspamd [options]
 =item B<--host>
 
 Specifies Rspamd host to use for scanning
-
-=item B<--local>
-
-Should be used if Rspamd runs on the same machine and can access CGP files
 
 =item B<--header>
 

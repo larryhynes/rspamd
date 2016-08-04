@@ -521,6 +521,8 @@ static void
 rspamd_http_finish_header (struct rspamd_http_connection *conn,
 		struct rspamd_http_connection_private *priv)
 {
+	struct rspamd_http_header *hdr;
+
 	priv->header->combined = rspamd_fstring_append (priv->header->combined,
 			"\r\n", 2);
 	priv->header->value->len = priv->header->combined->len -
@@ -528,8 +530,17 @@ rspamd_http_finish_header (struct rspamd_http_connection *conn,
 	priv->header->value->begin = priv->header->combined->str +
 			priv->header->name->len + 2;
 	priv->header->name->begin = priv->header->combined->str;
-	HASH_ADD_KEYPTR (hh, priv->msg->headers, priv->header->name->begin,
-			priv->header->name->len, priv->header);
+
+	HASH_FIND (hh, priv->msg->headers, priv->header->name->begin,
+			priv->header->name->len, hdr);
+
+	if (hdr == NULL) {
+		HASH_ADD_KEYPTR (hh, priv->msg->headers, priv->header->name->begin,
+				priv->header->name->len, priv->header);
+	}
+
+	DL_APPEND (hdr, priv->header);
+
 
 	rspamd_http_check_special_header (conn, priv);
 }
@@ -537,7 +548,7 @@ rspamd_http_finish_header (struct rspamd_http_connection *conn,
 static void
 rspamd_http_init_header (struct rspamd_http_connection_private *priv)
 {
-	priv->header = g_slice_alloc (sizeof (struct rspamd_http_header));
+	priv->header = g_slice_alloc0 (sizeof (struct rspamd_http_header));
 	priv->header->name = g_slice_alloc0 (sizeof (*priv->header->name));
 	priv->header->value = g_slice_alloc0 (sizeof (*priv->header->value));
 	priv->header->combined = rspamd_fstring_new ();
@@ -1677,7 +1688,7 @@ rspamd_http_message_write_header (const gchar* mime_type, gboolean encrypted,
 								"Date: %s\r\n"
 								"Content-Length: %z\r\n"
 								"Content-Type: %s", /* NO \r\n at the end ! */
-								msg->code, msg->status, "rspamd/1.3.0", datebuf,
+								msg->code, msg->status, "rspamd/" RVERSION, datebuf,
 								bodylen, mime_type);
 				enclen += meth_len;
 				/* External reply */
@@ -1699,7 +1710,7 @@ rspamd_http_message_write_header (const gchar* mime_type, gboolean encrypted,
 								"Date: %s\r\n"
 								"Content-Length: %z\r\n"
 								"Content-Type: %s\r\n",
-								msg->code, msg->status, "rspamd/1.3.0", datebuf,
+								msg->code, msg->status, "rspamd/" RVERSION, datebuf,
 								bodylen, mime_type);
 			}
 		}
@@ -2559,15 +2570,18 @@ rspamd_http_connection_set_max_size (struct rspamd_http_connection *conn,
 void
 rspamd_http_message_free (struct rspamd_http_message *msg)
 {
-	struct rspamd_http_header *hdr, *htmp;
+	struct rspamd_http_header *hdr, *htmp, *hcur, *hcurtmp;
 
 
 	HASH_ITER (hh, msg->headers, hdr, htmp) {
 		HASH_DEL (msg->headers, hdr);
-		rspamd_fstring_free (hdr->combined);
-		g_slice_free1 (sizeof (*hdr->name), hdr->name);
-		g_slice_free1 (sizeof (*hdr->value), hdr->value);
-		g_slice_free1 (sizeof (struct rspamd_http_header), hdr);
+
+		DL_FOREACH_SAFE (hdr, hcur, hcurtmp) {
+			rspamd_fstring_free (hcur->combined);
+			g_slice_free1 (sizeof (*hcur->name), hcur->name);
+			g_slice_free1 (sizeof (*hcur->value), hcur->value);
+			g_slice_free1 (sizeof (struct rspamd_http_header), hcur);
+		}
 	}
 
 
@@ -2631,6 +2645,33 @@ rspamd_http_message_find_header (struct rspamd_http_message *msg,
 
 	return res;
 }
+
+GPtrArray*
+rspamd_http_message_find_header_multiple (
+		struct rspamd_http_message *msg,
+		const gchar *name)
+{
+	GPtrArray *res = NULL;
+	struct rspamd_http_header *hdr, *cur;
+
+	guint slen = strlen (name);
+
+	if (msg != NULL) {
+		HASH_FIND (hh, msg->headers, name, slen, hdr);
+
+		if (hdr) {
+			res = g_ptr_array_sized_new (4);
+
+			LL_FOREACH (hdr, cur) {
+				g_ptr_array_add (res, cur->value);
+			}
+		}
+	}
+
+
+	return res;
+}
+
 
 gboolean
 rspamd_http_message_remove_header (struct rspamd_http_message *msg,
