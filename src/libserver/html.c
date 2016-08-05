@@ -43,7 +43,7 @@ static struct html_tag_def tag_defs[] = {
 	{Tag_BDO, "bdo", (CM_INLINE)},
 	{Tag_BIG, "big", (CM_INLINE)},
 	{Tag_BLOCKQUOTE, "blockquote", (CM_BLOCK)},
-	{Tag_BODY, "body", (CM_HTML | CM_OPT | CM_OMITST | CM_UNIQUE)},
+	{Tag_BODY, "body", (CM_HTML | CM_OPT | CM_OMITST | CM_UNIQUE | FL_BLOCK)},
 	{Tag_BR, "br", (CM_INLINE | CM_EMPTY)},
 	{Tag_BUTTON, "button", (CM_INLINE|FL_BLOCK)},
 	{Tag_CAPTION, "caption", (CM_TABLE)},
@@ -61,7 +61,7 @@ static struct html_tag_def tag_defs[] = {
 	{Tag_DT, "dt", (CM_DEFLIST | CM_OPT | CM_NO_INDENT)},
 	{Tag_EM, "em", (CM_INLINE)},
 	{Tag_FIELDSET, "fieldset", (CM_BLOCK)},
-	{Tag_FONT, "font", (CM_INLINE|FL_BLOCK)},
+	{Tag_FONT, "font", (FL_BLOCK)},
 	{Tag_FORM, "form", (CM_BLOCK)},
 	{Tag_FRAME, "frame", (CM_FRAMES | CM_EMPTY)},
 	{Tag_FRAMESET, "frameset", (CM_HTML | CM_FRAMES)},
@@ -118,12 +118,12 @@ static struct html_tag_def tag_defs[] = {
 	{Tag_STYLE, "style", (CM_HEAD)},
 	{Tag_SUB, "sub", (CM_INLINE)},
 	{Tag_SUP, "sup", (CM_INLINE)},
-	{Tag_TABLE, "table", (CM_BLOCK)},
-	{Tag_TBODY, "tbody", (CM_TABLE | CM_ROWGRP | CM_OPT)},
+	{Tag_TABLE, "table", (CM_BLOCK | FL_BLOCK)},
+	{Tag_TBODY, "tbody", (CM_TABLE | CM_ROWGRP | CM_OPT| FL_BLOCK)},
 	{Tag_TD, "td", (CM_ROW | CM_OPT | CM_NO_INDENT | FL_BLOCK)},
 	{Tag_TEXTAREA, "textarea", (CM_INLINE | CM_FIELD)},
 	{Tag_TFOOT, "tfoot", (CM_TABLE | CM_ROWGRP | CM_OPT)},
-	{Tag_TH, "th", (CM_ROW | CM_OPT | CM_NO_INDENT)},
+	{Tag_TH, "th", (CM_ROW | CM_OPT | CM_NO_INDENT | FL_BLOCK)},
 	{Tag_THEAD, "thead", (CM_TABLE | CM_ROWGRP | CM_OPT)},
 	{Tag_TITLE, "title", (CM_HEAD | CM_UNIQUE)},
 	{Tag_TR, "tr", (CM_TABLE | CM_OPT| FL_BLOCK)},
@@ -539,23 +539,37 @@ rspamd_html_check_balance (GNode * node, GNode ** cur_level)
 	return FALSE;
 }
 
-gboolean
-rspamd_html_tag_seen (struct html_content *hc, const gchar *tagname)
+gint
+rspamd_html_tag_by_name (const gchar *name)
 {
 	struct html_tag tag;
 	struct html_tag_def *found;
 
-	g_assert (hc != NULL);
-	g_assert (hc->tags_seen != NULL);
-
-	tag.name.start = tagname;
-	tag.name.len = strlen (tagname);
+	tag.name.start = name;
+	tag.name.len = strlen (name);
 
 	found = bsearch (&tag, tag_defs, G_N_ELEMENTS (tag_defs),
 			sizeof (tag_defs[0]), tag_find);
 
 	if (found) {
-		return isset (hc->tags_seen, found->id);
+		return found->id;
+	}
+
+	return -1;
+}
+
+gboolean
+rspamd_html_tag_seen (struct html_content *hc, const gchar *tagname)
+{
+	gint id;
+
+	g_assert (hc != NULL);
+	g_assert (hc->tags_seen != NULL);
+
+	id = rspamd_html_tag_by_name (tagname);
+
+	if (id != -1) {
+		return isset (hc->tags_seen, id);
 	}
 
 	return FALSE;
@@ -775,8 +789,12 @@ rspamd_html_process_tag (rspamd_mempool_t *pool, struct html_content *hc,
 		else {
 			parent = (*cur_level)->data;
 
-			if (parent && (parent->flags & FL_IGNORE)) {
-				tag->flags |= FL_IGNORE;
+			if (parent) {
+				if ((parent->flags & FL_IGNORE)) {
+					tag->flags |= FL_IGNORE;
+				}
+
+				parent->content_length += tag->content_length;
 			}
 
 			g_node_append (*cur_level, nnode);
@@ -860,6 +878,11 @@ rspamd_html_parse_tag_component (rspamd_mempool_t *pool,
 			}
 			else if (g_ascii_strncasecmp (begin, "class", len) == 0) {
 				NEW_COMPONENT (RSPAMD_HTML_COMPONENT_CLASS);
+			}
+		}
+		else if (len == 7) {
+			if (g_ascii_strncasecmp (begin, "bgcolor", len) == 0) {
+				NEW_COMPONENT (RSPAMD_HTML_COMPONENT_BGCOLOR);
 			}
 		}
 	}
@@ -1549,9 +1572,11 @@ rspamd_html_process_block_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 		struct html_content *hc)
 {
 	struct html_tag_component *comp;
-	struct html_block *bl;
+	struct html_block *bl, *bl_parent;
 	rspamd_ftok_t fstr;
 	GList *cur;
+	GNode *parent;
+	struct html_tag *parent_tag;
 
 	cur = tag->params->head;
 	bl = rspamd_mempool_alloc0 (pool, sizeof (*bl));
@@ -1565,6 +1590,17 @@ rspamd_html_process_block_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 			fstr.len = comp->len;
 			rspamd_html_process_color (comp->start, comp->len, &bl->font_color);
 			msg_debug_pool ("got color: %xd", bl->font_color.d.val);
+		}
+		else if (comp->type == RSPAMD_HTML_COMPONENT_BGCOLOR && comp->len > 0) {
+			fstr.begin = (gchar *)comp->start;
+			fstr.len = comp->len;
+			rspamd_html_process_color (comp->start, comp->len, &bl->background_color);
+			msg_debug_pool ("got color: %xd", bl->font_color.d.val);
+
+			if (tag->id == Tag_BODY) {
+				/* Set global background color */
+				memcpy (&hc->bgcolor, &bl->background_color, sizeof (hc->bgcolor));
+			}
 		}
 		else if (comp->type == RSPAMD_HTML_COMPONENT_STYLE && comp->len > 0) {
 			bl->style.len = comp->len;
@@ -1580,6 +1616,47 @@ rspamd_html_process_block_tag (rspamd_mempool_t *pool, struct html_tag *tag,
 		}
 
 		cur = g_list_next (cur);
+	}
+
+	if (!bl->background_color.valid) {
+		/* Try to propagate background color from parent nodes */
+		for (parent = tag->parent; parent != NULL; parent = parent->parent) {
+			parent_tag = parent->data;
+
+			if (parent_tag && (parent_tag->flags & FL_BLOCK) && parent_tag->extra) {
+				bl_parent = parent_tag->extra;
+
+				if (bl_parent->background_color.valid) {
+					memcpy (&bl->background_color, &bl_parent->background_color,
+							sizeof (bl->background_color));
+				}
+			}
+		}
+	}
+	if (!bl->font_color.valid) {
+		/* Try to propagate background color from parent nodes */
+		for (parent = tag->parent; parent != NULL; parent = parent->parent) {
+			parent_tag = parent->data;
+
+			if (parent_tag && (parent_tag->flags & FL_BLOCK) && parent_tag->extra) {
+				bl_parent = parent_tag->extra;
+
+				if (bl_parent->font_color.valid) {
+					memcpy (&bl->font_color, &bl_parent->font_color,
+							sizeof (bl->font_color));
+				}
+			}
+		}
+	}
+
+	/* Set bgcolor to the html bgcolor and font color to black as a last resort */
+	if (!bl->font_color.valid) {
+		bl->font_color.d.val = 0;
+		bl->font_color.d.comp.alpha = 255;
+		bl->font_color.valid = TRUE;
+	}
+	if (!bl->background_color.valid) {
+		memcpy (&bl->background_color, &hc->bgcolor, sizeof (hc->bgcolor));
 	}
 
 	if (hc->blocks == NULL) {
@@ -1605,7 +1682,7 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 	guint obrace = 0, ebrace = 0;
 	GNode *cur_level = NULL;
 	gint substate = 0, len, href_offset = -1;
-	struct html_tag *cur_tag = NULL;
+	struct html_tag *cur_tag = NULL, *content_tag = NULL;
 	struct rspamd_url *url = NULL, *turl;
 	struct rspamd_process_exception *ex;
 	enum {
@@ -1647,6 +1724,13 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 	}
 
 	hc->tags_seen = rspamd_mempool_alloc0 (pool, NBYTES (G_N_ELEMENTS (tag_defs)));
+
+	/* Set white background color by default */
+	hc->bgcolor.d.comp.alpha = 0;
+	hc->bgcolor.d.comp.r = 255;
+	hc->bgcolor.d.comp.g = 255;
+	hc->bgcolor.d.comp.b = 255;
+	hc->bgcolor.valid = TRUE;
 
 	dest = g_byte_array_sized_new (in->len / 3 * 2);
 
@@ -1815,6 +1899,13 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 						}
 
 						g_byte_array_append (dest, c, len);
+						if (content_tag) {
+							if (content_tag->content == NULL) {
+								content_tag->content = c;
+							}
+
+							content_tag->content_length += p - c + 1;
+						}
 					}
 
 					c = p;
@@ -1843,7 +1934,17 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 					}
 
 					g_byte_array_append (dest, c, len);
+
+					if (content_tag) {
+						if (content_tag->content == NULL) {
+							content_tag->content = c;
+						}
+
+						content_tag->content_length += p - c;
+					}
 				}
+
+				content_tag = NULL;
 
 				state = tag_begin;
 				continue;
@@ -1857,6 +1958,10 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 				c = p;
 				state = content_write;
 				continue;
+			}
+
+			if (content_tag) {
+				content_tag->content_length ++;
 			}
 
 			p ++;
@@ -1916,6 +2021,10 @@ rspamd_html_process_part_full (rspamd_mempool_t *pool, struct html_content *hc,
 						}
 					}
 					setbit (hc->tags_seen, cur_tag->id);
+				}
+
+				if (!(cur_tag->flags & (FL_CLOSED|FL_CLOSING))) {
+					content_tag = cur_tag;
 				}
 
 				/* Handle newlines */

@@ -251,7 +251,7 @@ rspamd_protocol_handle_url (struct rspamd_task *task,
 			value = v;
 			/* Steal strings */
 			g_hash_table_iter_steal (&it);
-			g_hash_table_replace (task->request_headers, key, value);
+			rspamd_task_add_request_header (task, key, value);
 			msg_debug_task ("added header \"%T\" -> \"%T\" from HTTP query",
 					key, value);
 		}
@@ -289,8 +289,6 @@ rspamd_protocol_handle_headers (struct rspamd_task *task,
 			hv = rspamd_fstring_new_init (h->value->begin, h->value->len);
 			hn_tok = rspamd_ftok_map (hn);
 			hv_tok = rspamd_ftok_map (hv);
-
-			g_hash_table_replace (task->request_headers, hn_tok, hv_tok);
 
 			switch (*hn_tok->begin) {
 			case 'd':
@@ -469,12 +467,9 @@ rspamd_protocol_handle_headers (struct rspamd_task *task,
 				debug_task ("unknown header: %V", hn);
 				break;
 			}
-		}
-	}
 
-	if (task->hostname == NULL || task->hostname[0] == '\0') {
-		/* We assume that hostname is either "unknown" or existing */
-		task->hostname = rspamd_mempool_strdup (task->task_pool, "unknown");
+			rspamd_task_add_request_header (task, hn_tok, hv_tok);
+		}
 	}
 
 	if (!has_ip) {
@@ -675,6 +670,7 @@ urls_protocol_cb (gpointer key, gpointer value, gpointer ud)
 	struct rspamd_task *task = cb->task;
 	const gchar *user_field = "unknown";
 	gboolean has_user = FALSE;
+	guint len = 0;
 
 	if (!(task->flags & RSPAMD_TASK_FLAG_EXT_URLS)) {
 		obj = ucl_object_fromlstring (url->string, url->urllen);
@@ -688,16 +684,18 @@ urls_protocol_cb (gpointer key, gpointer value, gpointer ud)
 	if (cb->task->cfg->log_urls) {
 		if (task->user) {
 			user_field = task->user;
+			len = strlen (task->user);
 			has_user = TRUE;
 		}
 		else if (task->from_envelope) {
 			user_field = task->from_envelope->addr;
+			len = task->from_envelope->addr_len;
 		}
 
-		msg_info_task ("<%s> %s: %s; ip: %s; URL: %*s",
+		msg_info_task ("<%s> %s: %*s; ip: %s; URL: %*s",
 			task->message_id,
 			has_user ? "user" : "from",
-			user_field,
+			len, user_field,
 			rspamd_inet_address_to_string (task->from_addr),
 			url->urllen, url->string);
 	}

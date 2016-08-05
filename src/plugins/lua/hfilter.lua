@@ -1,5 +1,5 @@
 --[[
-Copyright (c) 2011-2015, Vsevolod Stakhov <vsevolod@highsecure.ru>
+Copyright (c) 2011-2016, Vsevolod Stakhov <vsevolod@highsecure.ru>
 Copyright (c) 2013-2015, Alexey Savelyev <info@homeweb.ru>
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -242,35 +242,49 @@ local function hfilter(task)
   if config['url_enabled'] then
     local parts = task:get_text_parts()
     if parts then
-      --One text part--
-      local total_parts_len = 0
-      local text_parts_count = 0
-      local lines_max = 0
-      local selected_text_part = nil
+      local plain_text_part = nil
+      local html_text_part = nil
       for _,p in ipairs(parts) do
-        total_parts_len = total_parts_len + p:get_length()
-
-        if p:get_lines_count() > lines_max then
-          lines_max = p:get_lines_count()
-        end
-
-        if not p:is_html() then
-          text_parts_count = text_parts_count + 1
-          selected_text_part = p
+        if p:is_html() then
+          html_text_part = p
+        else
+          plain_text_part = p
         end
       end
-      if total_parts_len > 0 then
-        local urls = task:get_urls()
-        if urls then
-          local total_url_len = 0
-          for _,url in ipairs(urls) do
-            total_url_len = total_url_len + url:get_length()
+
+      if html_text_part then
+        local hc = html_text_part:get_html()
+        if hc then
+          local url_len = 0
+          hc:foreach_tag('a', function(tag, len)
+            url_len = url_len + len
+            return false
+          end)
+
+          local plen = html_text_part:get_length()
+
+          if url_len > 0 and plen > 0 then
+            local rel = url_len / plen
+            if rel > 0.8 then
+              task:insert_result('HFILTER_URL_ONLY', (rel - 0.8) * 5.0)
+              local lines =  html_text_part:get_lines()
+              if lines > 0 and lines < 2 then
+                task:insert_result('HFILTER_URL_ONELINE', 1.00)
+              end
+            end
           end
-          if total_url_len > 0 then
-            if total_url_len + 7 > total_parts_len then
-              task:insert_result('HFILTER_URL_ONLY', 1.00)
-            elseif lines_max > 0 and lines_max < 2 then
-              task:insert_result('HFILTER_URL_ONELINE', 1.00)
+        elseif plain_text_part then
+          local url_len = plain_text_part:get_urls_length()
+          local plen = plain_text_part:get_length()
+
+          if plen > 0 and url_len > 0 then
+            local rel = url_len / plen
+            if rel > 0.8 then
+              task:insert_result('HFILTER_URL_ONLY', (rel - 0.8) * 5.0)
+              local lines =  plain_text_part:get_lines()
+              if lines > 0 and lines < 2 then
+                task:insert_result('HFILTER_URL_ONELINE', 1.00)
+              end
             end
           end
         end
@@ -342,8 +356,6 @@ local function hfilter(task)
           end
         end
       end
-    else
-      task:insert_result('HFILTER_HELO_UNKNOWN', 1.0)
     end
   end
 
@@ -363,8 +375,6 @@ local function hfilter(task)
           end
         end
       end
-    else
-      task:insert_result('HFILTER_HOSTNAME_UNKNOWN', 1.00)
     end
   end
 
@@ -430,7 +440,6 @@ local symbols_enabled = {}
 local symbols_helo = {
   "HFILTER_HELO_BAREIP",
   "HFILTER_HELO_BADIP",
-  "HFILTER_HELO_UNKNOWN",
   "HFILTER_HELO_1",
   "HFILTER_HELO_2",
   "HFILTER_HELO_3",

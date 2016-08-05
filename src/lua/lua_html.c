@@ -85,7 +85,7 @@ LUA_FUNCTION_DEF (html, get_images);
 
 /***
  * @method html:get_blocks()
- * Retruns a table of html blocks. Each block provides the following data:
+ * Returns a table of html blocks. Each block provides the following data:
  *
  * `tag` - corresponding tag
  * `color` - a triplet (r g b) for font color
@@ -95,11 +95,27 @@ LUA_FUNCTION_DEF (html, get_images);
  */
 LUA_FUNCTION_DEF (html, get_blocks);
 
+/***
+ * @method html:foreach_tag(tagname, callback)
+ * Processes HTML tree calling the specified callback for each tag of the specified
+ * type.
+ *
+ * Callback is called with the following attributes:
+ *
+ * - `tag`: html tag structure
+ * - `content_length`: length of content within a tag
+ *
+ * Callback function should return `true` to **stop** processing and `false` to continue
+ * @return nothing
+ */
+LUA_FUNCTION_DEF (html, foreach_tag);
+
 static const struct luaL_reg htmllib_m[] = {
 	LUA_INTERFACE_DEF (html, has_tag),
 	LUA_INTERFACE_DEF (html, has_property),
 	LUA_INTERFACE_DEF (html, get_images),
 	LUA_INTERFACE_DEF (html, get_blocks),
+	LUA_INTERFACE_DEF (html, foreach_tag),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -123,10 +139,38 @@ LUA_FUNCTION_DEF (html_tag, get_extra);
  */
 LUA_FUNCTION_DEF (html_tag, get_parent);
 
+/***
+ * @method html_tag:get_flags()
+ * Returns flags a specified tag:
+ *
+ * - `closed`: tag is properly closed
+ * - `closing`: tag is a closing tag
+ * - `broken`: tag is somehow broken
+ * - `unbalanced`: tag is unbalanced
+ * - `xml`: tag is xml tag
+ * @return {table} table of flags
+ */
+LUA_FUNCTION_DEF (html_tag, get_flags);
+/***
+ * @method html_tag:get_content()
+ * Returns content of tag (approximate for some cases)
+ * @return {rspamd_text} rspamd text with tag's content
+ */
+LUA_FUNCTION_DEF (html_tag, get_content);
+/***
+ * @method html_tag:get_content_length()
+ * Returns length of a tag's content
+ * @return {number} size of content enclosed within a tag
+ */
+LUA_FUNCTION_DEF (html_tag, get_content_length);
+
 static const struct luaL_reg taglib_m[] = {
 	LUA_INTERFACE_DEF (html_tag, get_type),
 	LUA_INTERFACE_DEF (html_tag, get_extra),
 	LUA_INTERFACE_DEF (html_tag, get_parent),
+	LUA_INTERFACE_DEF (html_tag, get_flags),
+	LUA_INTERFACE_DEF (html_tag, get_content),
+	LUA_INTERFACE_DEF (html_tag, get_content_length),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}
 };
@@ -267,61 +311,70 @@ lua_html_get_images (lua_State *L)
 	return 1;
 }
 
+static void
+lua_html_push_block (lua_State *L, struct html_block *bl)
+{
+	struct rspamd_lua_text *t;
+	struct html_tag **ptag;
+
+	lua_createtable (L, 0, 4);
+
+	if (bl->tag) {
+		lua_pushstring (L, "tag");
+		ptag = lua_newuserdata (L, sizeof (gpointer));
+		*ptag = bl->tag;
+		rspamd_lua_setclass (L, "rspamd{html_tag}", -1);
+		lua_settable (L, -3);
+	}
+
+	if (bl->font_color.valid) {
+		lua_pushstring (L, "color");
+		lua_newtable (L);
+		lua_pushnumber (L, bl->font_color.d.comp.r);
+		lua_rawseti (L, -2, 1);
+		lua_pushnumber (L, bl->font_color.d.comp.g);
+		lua_rawseti (L, -2, 2);
+		lua_pushnumber (L, bl->font_color.d.comp.b);
+		lua_rawseti (L, -2, 3);
+		lua_settable (L, -3);
+	}
+	if (bl->background_color.valid) {
+		lua_pushstring (L, "bgcolor");
+		lua_newtable (L);
+		lua_pushnumber (L, bl->background_color.d.comp.r);
+		lua_rawseti (L, -2, 1);
+		lua_pushnumber (L, bl->background_color.d.comp.g);
+		lua_rawseti (L, -2, 2);
+		lua_pushnumber (L, bl->background_color.d.comp.b);
+		lua_rawseti (L, -2, 3);
+		lua_settable (L, -3);
+	}
+
+	if (bl->style.len > 0) {
+		lua_pushstring (L, "style");
+		t = lua_newuserdata (L, sizeof (*t));
+		t->start = bl->style.start;
+		t->len = bl->style.len;
+		t->own = FALSE;
+		lua_settable (L, -3);
+	}
+}
+
 static gint
 lua_html_get_blocks (lua_State *L)
 {
 	struct html_content *hc = lua_check_html (L, 1);
 	struct html_block *bl;
-	struct rspamd_lua_text *t;
+
 	guint i;
 
 	if (hc != NULL) {
-		lua_newtable (L);
+		lua_createtable (L, hc->blocks->len, 0);
 
 		if (hc->blocks && hc->blocks->len > 0) {
 			for (i = 0; i < hc->blocks->len; i ++) {
 				bl = g_ptr_array_index (hc->blocks, i);
-
-				lua_newtable (L);
-
-				if (bl->tag) {
-					lua_pushstring (L, "tag");
-					lua_pushlstring (L, bl->tag->name.start, bl->tag->name.len);
-					lua_settable (L, -3);
-				}
-
-				if (bl->font_color.valid) {
-					lua_pushstring (L, "color");
-					lua_newtable (L);
-					lua_pushnumber (L, bl->font_color.d.comp.r);
-					lua_rawseti (L, -2, 1);
-					lua_pushnumber (L, bl->font_color.d.comp.g);
-					lua_rawseti (L, -2, 2);
-					lua_pushnumber (L, bl->font_color.d.comp.b);
-					lua_rawseti (L, -2, 3);
-					lua_settable (L, -3);
-				}
-				if (bl->background_color.valid) {
-					lua_pushstring (L, "color");
-					lua_newtable (L);
-					lua_pushnumber (L, bl->background_color.d.comp.r);
-					lua_rawseti (L, -2, 1);
-					lua_pushnumber (L, bl->background_color.d.comp.g);
-					lua_rawseti (L, -2, 2);
-					lua_pushnumber (L, bl->background_color.d.comp.b);
-					lua_rawseti (L, -2, 3);
-					lua_settable (L, -3);
-				}
-
-				if (bl->style.len > 0) {
-					lua_pushstring (L, "style");
-					t = lua_newuserdata (L, sizeof (*t));
-					t->start = bl->style.start;
-					t->len = bl->style.len;
-					t->own = FALSE;
-					lua_settable (L, -3);
-				}
-
+				lua_html_push_block (L, bl);
 				lua_rawseti (L, -2, i + 1);
 			}
 		}
@@ -330,10 +383,87 @@ lua_html_get_blocks (lua_State *L)
 		}
 	}
 	else {
-		lua_pushnil (L);
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
+}
+
+struct lua_html_traverse_ud {
+	lua_State *L;
+	gint cbref;
+	gint tag_id;
+};
+
+static gboolean
+lua_html_node_foreach_cb (GNode *n, gpointer d)
+{
+	struct lua_html_traverse_ud *ud = d;
+	struct html_tag *tag = n->data, **ptag;
+
+	if (tag && (ud->tag_id == -1 || ud->tag_id == tag->id)) {
+
+		lua_rawgeti (ud->L, LUA_REGISTRYINDEX, ud->cbref);
+
+		ptag = lua_newuserdata (ud->L, sizeof (*ptag));
+		*ptag = tag;
+		rspamd_lua_setclass (ud->L, "rspamd{html_tag}", -1);
+		lua_pushnumber (ud->L, tag->content_length);
+
+		if (lua_pcall (ud->L, 2, 1, 0) != 0) {
+			msg_err ("error in foreach_tag callback: %s", lua_tostring (ud->L, -1));
+			lua_pop (ud->L, 1);
+			return TRUE;
+		}
+
+		if (lua_toboolean (ud->L, -1)) {
+			lua_pop (ud->L, 1);
+			return TRUE;
+		}
+
+		lua_pop (ud->L, 1);
+	}
+
+	return FALSE;
+}
+
+static gint
+lua_html_foreach_tag (lua_State *L)
+{
+	struct html_content *hc = lua_check_html (L, 1);
+	struct lua_html_traverse_ud ud;
+	const gchar *tagname;
+	gint id;
+
+	tagname = luaL_checkstring (L, 2);
+
+	if (hc && tagname && lua_isfunction (L, 3)) {
+		if (strcmp (tagname, "any") == 0) {
+			id = -1;
+		}
+		else {
+			id = rspamd_html_tag_by_name (tagname);
+
+			if (id == -1) {
+				return luaL_error (L, "invalid tagname: %s", tagname);
+			}
+		}
+
+		lua_pushvalue (L, 3);
+		ud.cbref = luaL_ref (L, LUA_REGISTRYINDEX);
+		ud.L = L;
+		ud.tag_id = id;
+
+		g_node_traverse (hc->html_tags, G_PRE_ORDER, G_TRAVERSE_ALL, -1,
+				lua_html_node_foreach_cb, &ud);
+
+		luaL_unref (L, LUA_REGISTRYINDEX, ud.cbref);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 0;
 }
 
 static gint
@@ -353,7 +483,7 @@ lua_html_tag_get_type (lua_State *L)
 		}
 	}
 	else {
-		lua_error (L);
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
@@ -375,7 +505,84 @@ lua_html_tag_get_parent (lua_State *L)
 		}
 	}
 	else {
-		lua_error (L);
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_html_tag_get_flags (lua_State *L)
+{
+	struct html_tag *tag = lua_check_html_tag (L, 1);
+	gint i = 1;
+
+	if (tag) {
+		/* Push flags */
+		lua_createtable (L, 4, 0);
+		if (tag->flags & FL_CLOSING) {
+			lua_pushstring (L, "closing");
+			lua_rawseti (L, -2, i++);
+		}
+		if (tag->flags & FL_CLOSED) {
+			lua_pushstring (L, "closed");
+			lua_rawseti (L, -2, i++);
+		}
+		if (tag->flags & FL_BROKEN) {
+			lua_pushstring (L, "broken");
+			lua_rawseti (L, -2, i++);
+		}
+		if (tag->flags & FL_XML) {
+			lua_pushstring (L, "xml");
+			lua_rawseti (L, -2, i++);
+		}
+		if (tag->flags & RSPAMD_HTML_FLAG_UNBALANCED) {
+			lua_pushstring (L, "unbalanced");
+			lua_rawseti (L, -2, i++);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_html_tag_get_content (lua_State *L)
+{
+	struct html_tag *tag = lua_check_html_tag (L, 1);
+	struct rspamd_lua_text *t;
+
+	if (tag) {
+		if (tag->content && tag->content_length) {
+			t = lua_newuserdata (L, sizeof (*t));
+			rspamd_lua_setclass (L, "rspamd{text}", -1);
+			t->start = tag->content;
+			t->len = tag->content_length;
+			t->own = FALSE;
+		}
+		else {
+			lua_pushnil (L);
+		}
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
+	}
+
+	return 1;
+}
+
+static gint
+lua_html_tag_get_content_length (lua_State *L)
+{
+	struct html_tag *tag = lua_check_html_tag (L, 1);
+
+	if (tag) {
+		lua_pushnumber (L, tag->content_length);
+	}
+	else {
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
@@ -400,6 +607,9 @@ lua_html_tag_get_extra (lua_State *L)
 				img = tag->extra;
 				lua_html_push_image (L, img);
 			}
+			else if (tag->flags & FL_BLOCK) {
+				lua_html_push_block (L, tag->extra);
+			}
 			else {
 				/* Unknown extra ? */
 				lua_pushnil (L);
@@ -410,7 +620,7 @@ lua_html_tag_get_extra (lua_State *L)
 		}
 	}
 	else {
-		lua_error (L);
+		return luaL_error (L, "invalid arguments");
 	}
 
 	return 1;
