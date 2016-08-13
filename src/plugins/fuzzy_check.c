@@ -364,7 +364,7 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 	const ucl_object_t *value, *cur;
 	struct fuzzy_rule *rule;
 	ucl_object_iter_t it = NULL;
-	const char *k = NULL, *lua_script;
+	const char *k = NULL, *key_str = NULL, *shingles_key_str = NULL, *lua_script;
 
 	if (obj->type != UCL_OBJECT) {
 		msg_err_config ("invalid rule definition");
@@ -532,30 +532,33 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 		}
 	}
 
+	key_str = NULL;
 	if ((value = ucl_object_lookup (obj, "fuzzy_key")) != NULL) {
 		/* Create key from user's input */
-		k = ucl_object_tostring (value);
+		key_str = ucl_object_tostring (value);
 	}
 
 	/* Setup keys */
-	if (k == NULL) {
+	if (key_str == NULL) {
 		/* Use some default key for all ops */
-		k = "rspamd";
+		key_str = "rspamd";
 	}
 
 	rule->hash_key = g_string_sized_new (rspamd_cryptobox_HASHBYTES);
-	rspamd_cryptobox_hash (rule->hash_key->str, k, strlen (k), NULL, 0);
+	rspamd_cryptobox_hash (rule->hash_key->str, key_str, strlen (key_str), NULL, 0);
 	rule->hash_key->len = rspamd_cryptobox_HASHKEYBYTES;
 
+	shingles_key_str = NULL;
 	if ((value = ucl_object_lookup (obj, "fuzzy_shingles_key")) != NULL) {
-		k = ucl_object_tostring (value);
+		shingles_key_str = ucl_object_tostring (value);
 	}
-	if (k == NULL) {
-		k = "rspamd";
+	if (shingles_key_str == NULL) {
+		shingles_key_str = "rspamd";
 	}
 
 	rule->shingles_key = g_string_sized_new (rspamd_cryptobox_HASHBYTES);
-	rspamd_cryptobox_hash (rule->shingles_key->str, k, strlen (k), NULL, 0);
+	rspamd_cryptobox_hash (rule->shingles_key->str, shingles_key_str,
+			strlen (shingles_key_str), NULL, 0);
 	rule->shingles_key->len = 16;
 
 	if (rspamd_upstreams_count (rule->servers) == 0) {
@@ -574,6 +577,11 @@ fuzzy_parse_rule (struct rspamd_config *cfg, const ucl_object_t *obj,
 					SYMBOL_TYPE_VIRTUAL|SYMBOL_TYPE_FINE,
 					cb_id);
 		}
+
+		msg_info_config ("added fuzzy rule %s, key: %6xs, "
+				"shingles_key: %6xs, algorithm: %s",
+				rule->symbol, rule->hash_key->str, rule->shingles_key->str,
+				rule->algorithm_str);
 	}
 
 	rspamd_mempool_add_destructor (fuzzy_module_ctx->fuzzy_pool, fuzzy_free_rule,
@@ -1288,13 +1296,11 @@ fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
 		gint flag,
 		guint32 weight,
 		rspamd_mempool_t *pool,
-		const guchar *data,
-		gsize datalen)
+		guchar digest[rspamd_cryptobox_HASHBYTES])
 {
 	struct rspamd_fuzzy_cmd *cmd;
 	struct rspamd_fuzzy_encrypted_cmd *enccmd = NULL;
 	struct fuzzy_cmd_io *io;
-	rspamd_cryptobox_hash_state_t st;
 
 	if (rule->peer_key) {
 		enccmd = rspamd_mempool_alloc0 (pool, sizeof (*enccmd));
@@ -1312,10 +1318,7 @@ fuzzy_cmd_from_data_part (struct fuzzy_rule *rule,
 	}
 	cmd->shingles_count = 0;
 	cmd->tag = ottery_rand_uint32 ();
-	/* Use blake2b for digest */
-	rspamd_cryptobox_hash_init (&st, rule->hash_key->str, rule->hash_key->len);
-	rspamd_cryptobox_hash_update (&st, data, datalen);
-	rspamd_cryptobox_hash_final (&st, cmd->digest);
+	memcpy (cmd->digest, digest, sizeof (cmd->digest));
 
 	io = rspamd_mempool_alloc (pool, sizeof (*io));
 	io->flags = 0;
@@ -2059,7 +2062,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 							fuzzy_module_ctx->min_width) {
 						io = fuzzy_cmd_from_data_part (rule, c, flag, value,
 								task->task_pool,
-								image->data->data, image->data->len);
+								image->parent->digest);
 						if (io) {
 							g_ptr_array_add (res, io);
 						}
@@ -2074,7 +2077,7 @@ fuzzy_generate_commands (struct rspamd_task *task, struct fuzzy_rule *rule,
 				fuzzy_module_ctx->min_bytes) {
 				io = fuzzy_cmd_from_data_part (rule, c, flag, value,
 						task->task_pool,
-						mime_part->content->data, mime_part->content->len);
+						mime_part->digest);
 				if (io) {
 					g_ptr_array_add (res, io);
 				}
