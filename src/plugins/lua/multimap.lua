@@ -60,6 +60,10 @@ local function apply_hostname_filter(task, filter, hostname, r)
 end
 
 local function apply_url_filter(task, filter, url, r)
+  if not filter then
+    return url:get_host()
+  end
+
   if filter == 'tld' then
     return url:get_tld()
   elseif filter == 'full' then
@@ -365,7 +369,7 @@ local function multimap_callback(task, rule)
       end
     end
 
-    if r['filter'] then
+    if r['filter'] or r['type'] == 'url' then
       local fn = multimap_filters[r['type']]
 
       if fn then
