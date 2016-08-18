@@ -201,6 +201,30 @@ local function apply_filename_filter(task, filter, fn, r)
   return fn
 end
 
+local function apply_regexp_filter(task, filter, fn, r)
+  if string.find(filter, 'regexp:') then
+    if not r['re_filter'] then
+      local type,pat = string.match(filter, '(regexp:)(.+)')
+      if type and pat then
+        r['re_filter'] = regexp.create(pat)
+      end
+    end
+
+    if not r['re_filter'] then
+      rspamd_logger.errx(task, 'bad search filter: %s', filter)
+    else
+      local results = r['re_filter']:search(fn)
+      if results then
+        return results[1]
+      else
+        return nil
+      end
+    end
+  end
+
+  return fn
+end
+
 local function apply_content_filter(task, filter, r)
   if filter == 'body' then
     return {task:get_rawbody()}
@@ -239,6 +263,7 @@ local multimap_filters = {
   header = apply_addr_filter,
   url = apply_url_filter,
   filename = apply_filename_filter,
+  mempool = apply_regex_filter,
   --content = apply_content_filter, -- Content filters are special :(
 }
 
@@ -509,6 +534,21 @@ local function multimap_callback(task, rule)
     if hostname and hostname ~= 'unknown' then
       match_hostname(rule, hostname)
     end
+  elseif rt == 'asn' then
+    local asn = task:get_mempool():get_variable('asn')
+    if asn then
+      match_rule(rule, asn)
+    end
+  elseif rt == 'country' then
+    local country = task:get_mempool():get_variable('country')
+    if country then
+      match_rule(rule, country)
+    end
+  elseif rt == 'mempool' then
+    local var = task:get_mempool():get_variable(rule['variable'])
+    if var then
+      match_rule(rule, var)
+    end
   end
 end
 
@@ -536,6 +576,10 @@ local function add_multimap_rule(key, newrule)
   if not newrule['description'] then
     newrule['description'] = string.format('multimap, type %s: %s', newrule['type'],
       newrule['symbol'])
+  end
+  if newrule['type'] == 'mempool' and not newrule['variable'] then
+    rspamd_logger.errx(rspamd_config, 'mempool map requires variable')
+    return nil
   end
   -- Check cdb flag
   if string.find(newrule['map'], '^cdb://.*$') then
@@ -595,7 +639,10 @@ local function add_multimap_rule(key, newrule)
         or newrule['type'] == 'filename'
         or newrule['type'] == 'url'
         or newrule['type'] == 'content'
-        or newrule['type'] == 'hostname' then
+        or newrule['type'] == 'hostname'
+        or newrule['type'] == 'asn'
+        or newrule['type'] == 'country'
+        or newrule['type'] == 'mempool' then
         if newrule['regexp'] then
           newrule['hash'] = rspamd_config:add_map ({
             url = newrule['map'],

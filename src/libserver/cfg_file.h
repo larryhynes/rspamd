@@ -29,6 +29,7 @@ struct rspamd_stat_classifier;
 struct module_s;
 struct worker_s;
 struct rspamd_external_libs_ctx;
+struct rspamd_cryptobox_pubkey;
 
 enum { VAL_UNDEF=0, VAL_TRUE, VAL_FALSE };
 
@@ -312,6 +313,7 @@ struct rspamd_config {
 	gboolean log_urls;                              /**< whether we should log URLs                         */
 	GList *debug_symbols;                           /**< symbols to debug									*/
 	GHashTable *debug_modules;                      /**< logging modules to debug							*/
+	struct rspamd_cryptobox_pubkey *log_encryption_key; /**< encryption key for logs						*/
 	gboolean log_color;                             /**< output colors for console output                   */
 	gboolean log_extended;                          /**< log extended information							*/
 	gboolean log_systemd;                           /**< special case for systemd logger					*/
@@ -381,6 +383,7 @@ struct rspamd_config {
 	guint32 dns_io_per_server;                      /**< number of sockets per DNS server					*/
 	const ucl_object_t *nameservers;                /**< list of nameservers or NULL to parse resolv.conf	*/
 	guint32 dns_max_requests;                       /**< limit of DNS requests per task 					*/
+	gboolean enable_dnssec;                         /**< enable dnssec stub resolver						*/
 
 	guint upstream_max_errors;						/**< upstream max errors before shutting off			*/
 	gdouble upstream_error_time;					/**< rate of upstream errors							*/

@@ -133,6 +133,7 @@ struct rdns_reply {
 	struct rdns_reply_entry *entries;
 	const char *requested_name;
 	enum dns_rcode code;
+	bool authenticated;
 };
 
 typedef void (*rdns_periodic_callback)(void *user_data);
@@ -234,6 +235,12 @@ struct rdns_resolver *rdns_resolver_new (void);
  */
 void rdns_resolver_async_bind (struct rdns_resolver *resolver,
 		struct rdns_async_context *ctx);
+
+/**
+ * Enable stub dnssec resolver
+ * @param resolver
+ */
+void rdns_resolver_set_dnssec (struct rdns_resolver *resolver, bool enabled);
 
 /**
  * Add new DNS server definition to the resolver
@@ -380,6 +387,16 @@ const struct rdns_request_name* rdns_request_get_name (struct rdns_request *req,
  * @return name to resolve or NULL if `str` is not an IP address; caller must free result when it is unused
  */
 char * rdns_generate_ptr_from_str (const char *str);
+
+/**
+ * Format DNS name of the packet punycoding if needed
+ * @param req request
+ * @param name name string
+ * @param namelen length of name
+ */
+bool rdns_format_dns_name (struct rdns_resolver *resolver,
+		const char *name, size_t namelen,
+		char **out, size_t *outlen);
 
 /*
  * Private functions used by async libraries as callbacks
