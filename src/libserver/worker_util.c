@@ -87,8 +87,17 @@ rspamd_get_worker_by_type (struct rspamd_config *cfg, GQuark type)
 	return NULL;
 }
 
-sig_atomic_t wanna_die = 0;
+static void
+rspamd_worker_terminate_handlers (struct rspamd_worker *w)
+{
+	guint i;
+	void (*cb)(struct rspamd_worker *);
 
+	for (i = 0; i < w->finish_actions->len; i ++) {
+		cb = g_ptr_array_index (w->finish_actions, i);
+		cb (w);
+	}
+}
 /*
  * Config reload is designed by sending sigusr2 to active workers and pending shutdown of them
  */
@@ -98,10 +107,11 @@ rspamd_worker_usr2_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 	/* Do not accept new connections, preparing to end worker's process */
 	struct timeval tv;
 
-	if (!wanna_die) {
+	if (!sigh->worker->wanna_die) {
 		tv.tv_sec = SOFT_SHUTDOWN_TIME;
 		tv.tv_usec = 0;
-		wanna_die = 1;
+		sigh->worker->wanna_die = TRUE;
+		rspamd_worker_terminate_handlers (sigh->worker);
 		rspamd_default_log_function (G_LOG_LEVEL_INFO,
 				sigh->worker->srv->server_pool->tag.tagname,
 				sigh->worker->srv->server_pool->tag.uid,
@@ -127,14 +137,15 @@ rspamd_worker_term_handler (struct rspamd_worker_signal_handler *sigh, void *arg
 {
 	struct timeval tv;
 
-	if (!wanna_die) {
+	if (!sigh->worker->wanna_die) {
 		rspamd_default_log_function (G_LOG_LEVEL_INFO,
 				sigh->worker->srv->server_pool->tag.tagname,
 				sigh->worker->srv->server_pool->tag.uid,
 				G_STRFUNC,
 				"terminating after receiving signal %s",
 				g_strsignal (sigh->signo));
-		wanna_die = 1;
+		rspamd_worker_terminate_handlers (sigh->worker);
+		sigh->worker->wanna_die = 1;
 		tv.tv_sec = 0;
 		tv.tv_usec = 0;
 
@@ -525,6 +536,7 @@ rspamd_fork_worker (struct rspamd_main *rspamd_main,
 	memcpy (wrk->cf, cf, sizeof (struct rspamd_worker_conf));
 	wrk->index = index;
 	wrk->ctx = cf->ctx;
+	wrk->finish_actions = g_ptr_array_new ();
 
 	wrk->pid = fork ();
 

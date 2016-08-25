@@ -785,6 +785,7 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 
 	const guchar *p, *c, *end;
 	guint i;
+	goffset off;
 	struct rspamd_process_exception *ex;
 
 	/* Strip newlines */
@@ -799,8 +800,10 @@ rspamd_normalize_text_part (struct rspamd_task *task,
 
 	for (i = 0; i < part->newlines->len; i ++) {
 		ex = rspamd_mempool_alloc (task->task_pool, sizeof (*ex));
-		p = g_ptr_array_index (part->newlines, i);
-		ex->pos = p - c;
+		off = (goffset)g_ptr_array_index (part->newlines, i);
+		g_ptr_array_index (part->newlines, i) = (gpointer)(goffset)
+				(part->stripped_content->data + off);
+		ex->pos = off;
 		ex->len = 0;
 		ex->type = RSPAMD_EXCEPTION_NEWLINE;
 		part->exceptions = g_list_prepend (part->exceptions, ex);
@@ -1401,7 +1404,8 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * So we check if a task has non-http format then we check for such a line
 	 * at the beginning to avoid errors
 	 */
-	if (!(task->flags & RSPAMD_TASK_FLAG_JSON)) {
+	if (!(task->flags & RSPAMD_TASK_FLAG_JSON) || (task->flags &
+			RSPAMD_TASK_FLAG_LOCAL_CLIENT)) {
 		if (len > sizeof ("From ") - 1) {
 			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
 				/* Skip to CRLF */
@@ -1476,10 +1480,6 @@ rspamd_message_parse (struct rspamd_task *task)
 				task->raw_headers_content.begin = (gchar *) (p);
 				task->raw_headers_content.len = hdr_pos;
 				task->raw_headers_content.body_start = p + body_pos;
-
-				rspamd_cryptobox_hash_update (&st,
-						task->raw_headers_content.begin,
-						task->raw_headers_content.len);
 
 				if (task->raw_headers_content.len > 0) {
 					process_raw_headers (task, task->raw_headers,
@@ -1718,11 +1718,6 @@ rspamd_message_parse (struct rspamd_task *task)
 			debug_task (
 					"message contains two parts but they are in different multi-parts");
 		}
-	}
-	else {
-		debug_task (
-				"message has too many text parts, so do not try to compare "
-				"them with each other");
 	}
 
 	for (i = 0; i < task->parts->len; i ++) {

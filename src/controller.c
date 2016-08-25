@@ -369,29 +369,40 @@ rspamd_controller_check_forwarded (struct rspamd_controller_session *session,
 		 * We need to parse and update the header
 		 * X-Forwarded-For: client, proxy1, proxy2
 		 */
-		comma = memchr (hdr->begin, ',', hdr->len);
+		comma = rspamd_memrchr (hdr->begin, ',', hdr->len);
 		if (comma != NULL) {
-			if (rspamd_parse_inet_address (&addr, hdr->begin,
-					comma - hdr->begin)) {
-				/* We have addr now, so check if it is still trusted */
-				if (ctx->secure_map &&
-						radix_find_compressed_addr (ctx->secure_map,
-								addr) != RADIX_NO_VALUE) {
-					/* rspamd_inet_address_to_string is not reentrant */
-					rspamd_strlcpy (ip_buf, rspamd_inet_address_to_string (addr),
-							sizeof (ip_buf));
-					msg_info_session ("allow unauthorized proxied connection "
-							"from a trusted IP %s via %s",
-							ip_buf,
-							rspamd_inet_address_to_string (session->from_addr));
-					ret = 1;
-				}
-				else {
-					ret = -1;
-				}
-
-				rspamd_inet_address_destroy (addr);
+			while (comma < hdr->begin + hdr->len &&
+					(*comma == ',' || g_ascii_isspace (*comma))) {
+				comma ++;
 			}
+		}
+		else {
+			comma = hdr->begin;
+		}
+		if (rspamd_parse_inet_address (&addr, comma,
+				(hdr->begin + hdr->len) - comma)) {
+			/* We have addr now, so check if it is still trusted */
+			if (ctx->secure_map &&
+					radix_find_compressed_addr (ctx->secure_map,
+							addr) != RADIX_NO_VALUE) {
+				/* rspamd_inet_address_to_string is not reentrant */
+				rspamd_strlcpy (ip_buf, rspamd_inet_address_to_string (addr),
+						sizeof (ip_buf));
+				msg_info_session ("allow unauthorized proxied connection "
+						"from a trusted IP %s via %s",
+						ip_buf,
+						rspamd_inet_address_to_string (session->from_addr));
+				ret = 1;
+			}
+			else {
+				ret = -1;
+			}
+
+			rspamd_inet_address_destroy (addr);
+		}
+		else {
+			msg_warn_session ("cannot parse forwarded IP: %T", hdr);
+			ret = -1;
 		}
 	}
 	else {
@@ -418,6 +429,10 @@ rspamd_controller_check_forwarded (struct rspamd_controller_session *session,
 				}
 
 				rspamd_inet_address_destroy (addr);
+			}
+			else {
+				msg_warn_session ("cannot parse real IP: %T", hdr);
+				ret = -1;
 			}
 		}
 	}
@@ -2458,13 +2473,13 @@ rspamd_controller_store_saved_stats (struct rspamd_controller_worker_ctx *ctx)
 	fd = open (ctx->saved_stats_path, O_WRONLY|O_CREAT|O_TRUNC, 00644);
 
 	if (fd == -1) {
-		msg_err_ctx ("cannot load controller stats from %s: %s",
+		msg_err_ctx ("cannot open for writing controller stats from %s: %s",
 				ctx->saved_stats_path, strerror (errno));
 		return;
 	}
 
 	if (rspamd_file_lock (fd, FALSE) == -1) {
-		msg_err_ctx ("cannot load controller stats from %s: %s",
+		msg_err_ctx ("cannot lock controller stats in %s: %s",
 				ctx->saved_stats_path, strerror (errno));
 		close (fd);
 
@@ -2645,6 +2660,20 @@ init_controller_worker (struct rspamd_config *cfg)
 	return ctx;
 }
 
+static void
+rspamd_controller_on_terminate (struct rspamd_worker *worker)
+{
+	struct rspamd_controller_worker_ctx *ctx = worker->ctx;
+
+	rspamd_controller_store_saved_stats (ctx);
+
+	if (ctx->rrd) {
+		msg_info ("closing rrd file: %s", ctx->rrd->filename);
+		event_del (ctx->rrd_event);
+		rspamd_rrd_close (ctx->rrd);
+	}
+}
+
 /*
  * Start worker process
  */
@@ -2682,6 +2711,8 @@ start_controller_worker (struct rspamd_worker *worker)
 				DEFAULT_STATS_PATH);
 	}
 
+	g_ptr_array_add (worker->finish_actions,
+			(gpointer)rspamd_controller_on_terminate);
 	rspamd_controller_load_saved_stats (ctx);
 
 	/* RRD collector */
@@ -2817,11 +2848,6 @@ start_controller_worker (struct rspamd_worker *worker)
 	rspamd_stat_close ();
 	rspamd_http_router_free (ctx->http);
 	rspamd_log_close (worker->srv->logger);
-	rspamd_controller_store_saved_stats (ctx);
-
-	if (ctx->rrd) {
-		rspamd_rrd_close (ctx->rrd);
-	}
 
 	if (ctx->cached_password.len > 0) {
 		m = (gpointer)ctx->cached_password.begin;

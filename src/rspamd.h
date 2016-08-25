@@ -49,6 +49,7 @@ struct rspamd_worker {
 	pid_t pid;                      /**< pid of worker									*/
 	guint index;                    /**< index number									*/
 	guint nconns;                   /**< current connections count						*/
+	gboolean wanna_die;             /**< worker is terminating							*/
 	gdouble start_time;             /**< start time										*/
 	struct rspamd_main *srv;        /**< pointer to server structure					*/
 	GQuark type;                    /**< process type									*/
@@ -62,6 +63,7 @@ struct rspamd_worker {
 	                                     main process. [0] - main, [1] - worker			*/
 	struct event srv_ev;            /**< used by main for read workers' requests		*/
 	gpointer control_data;          /**< used by control protocol to handle commands	*/
+	GPtrArray *finish_actions;      /**< called when worker is terminated				*/
 };
 
 struct rspamd_abstract_worker_ctx {
