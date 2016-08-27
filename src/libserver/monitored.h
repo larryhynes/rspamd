@@ -62,7 +62,8 @@ struct rspamd_monitored *rspamd_monitored_create (
 		struct rspamd_monitored_ctx *ctx,
 		const gchar *line,
 		enum rspamd_monitored_type type,
-		enum rspamd_monitored_flags flags);
+		enum rspamd_monitored_flags flags,
+		const ucl_object_t *opts);
 
 /**
  * Return TRUE if monitored object is alive
@@ -70,6 +71,27 @@ struct rspamd_monitored *rspamd_monitored_create (
  * @return TRUE or FALSE
  */
 gboolean rspamd_monitored_alive (struct rspamd_monitored *m);
+
+/**
+ * Returns the current offline time for a monitored object
+ * @param m
+ * @return
+ */
+gdouble rspamd_monitored_offline_time (struct rspamd_monitored *m);
+
+/**
+ * Returns the total offline time for a monitored object
+ * @param m
+ * @return
+ */
+gdouble rspamd_monitored_total_offline_time (struct rspamd_monitored *m);
+
+/**
+ * Returns the latency for monitored object (in seconds)
+ * @param m
+ * @return
+ */
+gdouble rspamd_monitored_latency (struct rspamd_monitored *m);
 
 /**
  * Explicitly disable monitored object

@@ -20,14 +20,18 @@
 #include "monitored.h"
 #include "cryptobox.h"
 #include "logger.h"
+#include "radix.h"
 
-static const gdouble default_monitoring_interval = 10.0;
+static const gdouble default_monitoring_interval = 60.0;
 static const guint default_max_errors = 3;
 
 struct rspamd_monitored_methods {
 	void * (*monitored_config) (struct rspamd_monitored *m,
-			struct rspamd_monitored_ctx *ctx);
+			struct rspamd_monitored_ctx *ctx,
+			const ucl_object_t *opts);
 	void (*monitored_update) (struct rspamd_monitored *m,
+			struct rspamd_monitored_ctx *ctx, gpointer ud);
+	void (*monitored_dtor) (struct rspamd_monitored *m,
 			struct rspamd_monitored_ctx *ctx, gpointer ud);
 	gpointer ud;
 };
@@ -45,6 +49,10 @@ struct rspamd_monitored_ctx {
 struct rspamd_monitored {
 	gchar *url;
 	gdouble monitoring_interval;
+	gdouble offline_time;
+	gdouble total_offline_time;
+	gdouble latency;
+	guint nchecks;
 	guint max_errors;
 	guint cur_errors;
 	gboolean alive;
@@ -73,13 +81,58 @@ struct rspamd_monitored {
         G_STRFUNC, \
         __VA_ARGS__)
 
+static inline void
+rspamd_monitored_propagate_error (struct rspamd_monitored *m,
+		const gchar *error)
+{
+	if (m->alive) {
+		if (m->cur_errors < m->max_errors) {
+			msg_info_mon ("%s on resolving %s, %d retries left",
+					error, m->url,  m->max_errors - m->cur_errors);
+			m->cur_errors ++;
+		}
+		else {
+			msg_info_mon ("%s on resolving %s, disable object",
+					error, m->url);
+			m->alive = FALSE;
+			m->offline_time = rspamd_get_calendar_ticks ();
+		}
+	}
+}
+
+static inline void
+rspamd_monitored_propagate_success (struct rspamd_monitored *m, gdouble lat)
+{
+	gdouble t;
+
+	m->cur_errors = 0;
+
+	if (!m->alive) {
+		t = rspamd_get_calendar_ticks ();
+		m->total_offline_time += t - m->offline_time;
+		m->alive = TRUE;
+		msg_info_mon ("restoring %s after %.1f seconds of downtime, "
+				"total downtime: %.1f",
+				m->url, t - m->offline_time, m->total_offline_time);
+		m->offline_time = 0;
+		m->nchecks = 1;
+		m->latency = lat;
+	}
+	else {
+		m->latency = (lat + m->latency * m->nchecks) / (m->nchecks + 1);
+		m->nchecks ++;
+	}
+}
+
 static void
 rspamd_monitored_periodic (gint fd, short what, gpointer ud)
 {
 	struct rspamd_monitored *m = ud;
 	struct timeval tv;
+	gdouble jittered;
 
-	double_to_tv (m->monitoring_interval, &tv);
+	jittered = rspamd_time_jitter (m->monitoring_interval, 0.0);
+	double_to_tv (jittered, &tv);
 
 	if (m->proc.monitored_update) {
 		m->proc.monitored_update (m, m->ctx, m->proc.ud);
@@ -89,25 +142,186 @@ rspamd_monitored_periodic (gint fd, short what, gpointer ud)
 }
 
 struct rspamd_dns_monitored_conf {
-	void *unused;
+	enum rdns_request_type rt;
+	GString *request;
+	radix_compressed_t *expected;
+	struct rspamd_monitored *m;
+	gint expected_code;
+	gdouble check_tm;
 };
 
 static void *
 rspamd_monitored_dns_conf (struct rspamd_monitored *m,
-		struct rspamd_monitored_ctx *ctx)
+		struct rspamd_monitored_ctx *ctx,
+		const ucl_object_t *opts)
 {
 	struct rspamd_dns_monitored_conf *conf;
+	const ucl_object_t *elt;
+	gint rt;
+	GString *req = g_string_sized_new (127);
 
 	conf = g_malloc0 (sizeof (*conf));
+	conf->rt = RDNS_REQUEST_A;
+	conf->m = m;
+	conf->expected_code = -1;
+
+	if (opts) {
+		elt = ucl_object_lookup (opts, "type");
+
+		if (elt) {
+			rt = rdns_type_fromstr (ucl_object_tostring (elt));
+
+			if (rt != -1) {
+				conf->rt = rt;
+			}
+			else {
+				msg_err_mon ("invalid resolve type: %s",
+						ucl_object_tostring (elt));
+			}
+		}
+
+		elt = ucl_object_lookup (opts, "prefix");
+
+		if (elt && ucl_object_type (elt) == UCL_STRING) {
+			rspamd_printf_gstring (req, "%s.", ucl_object_tostring (elt));
+		}
+
+		elt = ucl_object_lookup (opts, "ipnet");
+
+		if (elt) {
+			if (ucl_object_type (elt) == UCL_STRING) {
+				radix_add_generic_iplist (ucl_object_tostring (elt),
+						&conf->expected, FALSE);
+			}
+			else if (ucl_object_type (elt) == UCL_ARRAY) {
+				const ucl_object_t *cur;
+				ucl_object_iter_t it = NULL;
+
+				while ((cur = ucl_object_iterate (elt, &it, true)) != NULL) {
+					radix_add_generic_iplist (ucl_object_tostring (elt),
+							&conf->expected, FALSE);
+				}
+			}
+		}
+
+		elt = ucl_object_lookup (opts, "rcode");
+		if (elt) {
+			rt = rdns_rcode_fromstr (ucl_object_tostring (elt));
+
+			if (rt != -1) {
+				conf->expected_code = rt;
+			}
+			else {
+				msg_err_mon ("invalid resolve rcode: %s",
+						ucl_object_tostring (elt));
+			}
+		}
+	}
+
+	rspamd_printf_gstring (req, "%s", m->url);
+	conf->request = req;
 
 	return conf;
+}
+
+static void
+rspamd_monitored_dns_cb (struct rdns_reply *reply, void *arg)
+{
+	struct rspamd_dns_monitored_conf *conf = arg;
+	struct rspamd_monitored *m;
+	gdouble lat;
+
+	m = conf->m;
+	lat = rspamd_get_calendar_ticks () - conf->check_tm;
+	conf->check_tm = 0;
+	msg_debug_mon ("dns callback for %s in %.2f: %s", m->url, lat,
+			rdns_strerror (reply->code));
+
+	if (reply->code == RDNS_RC_TIMEOUT) {
+		rspamd_monitored_propagate_error (m, "timeout");
+	}
+	else if (reply->code == RDNS_RC_SERVFAIL) {
+		rspamd_monitored_propagate_error (m, "servfail");
+	}
+	else if (reply->code == RDNS_RC_REFUSED) {
+		rspamd_monitored_propagate_error (m, "refused");
+	}
+	else {
+		if (conf->expected_code != -1) {
+			if (reply->code != conf->expected_code) {
+				msg_info_mon ("DNS reply returned %s while %s is expected",
+						rdns_strerror (reply->code),
+						rdns_strerror (conf->expected_code));
+				rspamd_monitored_propagate_error (m, "invalid return");
+			}
+		}
+		else if (conf->expected) {
+			/* We also need to check IP */
+			if (reply->code != RDNS_RC_NOERROR) {
+				rspamd_monitored_propagate_error (m, "no record");
+			}
+			else {
+				rspamd_inet_addr_t *addr;
+
+				addr = rspamd_inet_address_from_rnds (reply->entries);
+
+				if (!addr) {
+					rspamd_monitored_propagate_error (m,
+							"unreadable address");
+				}
+				else if (radix_find_compressed_addr (conf->expected, addr)) {
+					msg_info_mon ("bad address %s is returned when monitoring %s",
+							rspamd_inet_address_to_string (addr),
+							conf->request->str);
+					rspamd_monitored_propagate_error (m,
+							"invalid address");
+
+					rspamd_inet_address_destroy (addr);
+				}
+				else {
+					rspamd_monitored_propagate_success (m, lat);
+					rspamd_inet_address_destroy (addr);
+				}
+			}
+		}
+		else {
+			rspamd_monitored_propagate_success (m, lat);
+		}
+	}
 }
 
 void
 rspamd_monitored_dns_mon (struct rspamd_monitored *m,
 		struct rspamd_monitored_ctx *ctx, gpointer ud)
 {
+	struct rspamd_dns_monitored_conf *conf = ud;
 
+	if (!rdns_make_request_full (ctx->resolver, rspamd_monitored_dns_cb,
+			conf, ctx->cfg->dns_timeout, ctx->cfg->dns_retransmits,
+			conf->rt, conf->request->str)) {
+		msg_info_mon ("cannot make request to resolve %s", conf->request->str);
+
+		m->cur_errors ++;
+		rspamd_monitored_propagate_error (m, "failed to make DNS request");
+	}
+	else {
+		conf->check_tm = rspamd_get_calendar_ticks ();
+	}
+}
+
+void
+rspamd_monitored_dns_dtor (struct rspamd_monitored *m,
+		struct rspamd_monitored_ctx *ctx, gpointer ud)
+{
+	struct rspamd_dns_monitored_conf *conf = ud;
+
+	g_string_free (conf->request, TRUE);
+
+	if (conf->expected) {
+		radix_destroy_compressed (conf->expected);
+	}
+
+	g_free (conf);
 }
 
 struct rspamd_monitored_ctx *
@@ -151,7 +365,8 @@ struct rspamd_monitored *
 rspamd_monitored_create (struct rspamd_monitored_ctx *ctx,
 		const gchar *line,
 		enum rspamd_monitored_type type,
-		enum rspamd_monitored_flags flags)
+		enum rspamd_monitored_flags flags,
+		const ucl_object_t *opts)
 {
 	struct rspamd_monitored *m;
 	rspamd_cryptobox_hash_state_t st;
@@ -172,13 +387,20 @@ rspamd_monitored_create (struct rspamd_monitored_ctx *ctx,
 	if (type == RSPAMD_MONITORED_DNS) {
 		m->proc.monitored_update = rspamd_monitored_dns_mon;
 		m->proc.monitored_config = rspamd_monitored_dns_conf;
-		m->proc.ud = m->proc.monitored_config (m, ctx);
+		m->proc.monitored_dtor = rspamd_monitored_dns_dtor;
+	}
+	else {
+		g_slice_free1 (sizeof (*m), m);
 
-		if (m->proc.ud == NULL) {
-			g_slice_free1 (sizeof (*m), m);
+		return NULL;
+	}
 
-			return NULL;
-		}
+	m->proc.ud = m->proc.monitored_config (m, ctx, opts);
+
+	if (m->proc.ud == NULL) {
+		g_slice_free1 (sizeof (*m), m);
+
+		return NULL;
 	}
 
 	/* Create a persistent tag */
@@ -206,6 +428,39 @@ rspamd_monitored_alive (struct rspamd_monitored *m)
 	return m->alive;
 }
 
+gdouble
+rspamd_monitored_offline_time (struct rspamd_monitored *m)
+{
+	g_assert (m != NULL);
+
+	if (m->offline_time > 0) {
+		return rspamd_get_calendar_ticks () - m->offline_time;
+	}
+
+	return 0;
+}
+
+gdouble
+rspamd_monitored_total_offline_time (struct rspamd_monitored *m)
+{
+	g_assert (m != NULL);
+
+	if (m->offline_time > 0) {
+		return rspamd_get_calendar_ticks () - m->offline_time + m->total_offline_time;
+	}
+
+
+	return m->total_offline_time;
+}
+
+gdouble
+rspamd_monitored_latency (struct rspamd_monitored *m)
+{
+	g_assert (m != NULL);
+
+		return m->latency;
+}
+
 void
 rspamd_monitored_stop (struct rspamd_monitored *m)
 {
@@ -221,10 +476,12 @@ void
 rspamd_monitored_start (struct rspamd_monitored *m)
 {
 	struct timeval tv;
+	gdouble jittered;
 
 	g_assert (m != NULL);
 	msg_debug_mon ("started monitored object %s", m->url);
-	double_to_tv (m->monitoring_interval, &tv);
+	jittered = rspamd_time_jitter (m->monitoring_interval, 0.0);
+	double_to_tv (jittered, &tv);
 
 	if (event_get_base (&m->periodic)) {
 		event_del (&m->periodic);
@@ -247,7 +504,7 @@ rspamd_monitored_ctx_destroy (struct rspamd_monitored_ctx *ctx)
 		m = g_ptr_array_index (ctx->elts, i);
 		rspamd_monitored_stop (m);
 		g_free (m->url);
-		g_free (m->proc.ud);
+		m->proc.monitored_dtor (m, m->ctx, m->proc.ud);
 		g_slice_free1 (sizeof (*m), m);
 	}
 

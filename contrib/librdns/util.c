@@ -247,6 +247,96 @@ rdns_strtype (enum rdns_request_type type)
 	return dns_types[type];
 }
 
+enum rdns_request_type
+rdns_type_fromstr (const char *str)
+{
+	if (str) {
+		if (strcmp (str, "a") == 0) {
+			return RDNS_REQUEST_A;
+		}
+		else if (strcmp (str, "ns") == 0) {
+			return RDNS_REQUEST_NS;
+		}
+		else if (strcmp (str, "soa") == 0) {
+			return RDNS_REQUEST_SOA;
+		}
+		else if (strcmp (str, "ptr") == 0) {
+			return RDNS_REQUEST_PTR;
+		}
+		else if (strcmp (str, "mx") == 0) {
+			return RDNS_REQUEST_MX;
+		}
+		else if (strcmp (str, "srv") == 0) {
+			return RDNS_REQUEST_SRV;
+		}
+		else if (strcmp (str, "txt") == 0) {
+			return RDNS_REQUEST_TXT;
+		}
+		else if (strcmp (str, "spf") == 0) {
+			return RDNS_REQUEST_SPF;
+		}
+		else if (strcmp (str, "aaaa") == 0) {
+			return RDNS_REQUEST_AAAA;
+		}
+		else if (strcmp (str, "tlsa") == 0) {
+			return RDNS_REQUEST_TLSA;
+		}
+		else if (strcmp (str, "any") == 0) {
+			return RDNS_REQUEST_ANY;
+		}
+	}
+
+	return -1;
+}
+
+enum dns_rcode
+rdns_rcode_fromstr (const char *str)
+{
+	if (str) {
+		if (strcmp (str, "noerror") == 0) {
+			return RDNS_RC_NOERROR;
+		}
+		else if (strcmp (str, "formerr") == 0) {
+			return RDNS_RC_FORMERR;
+		}
+		else if (strcmp (str, "servfail") == 0) {
+			return RDNS_RC_SERVFAIL;
+		}
+		else if (strcmp (str, "nxdomain") == 0) {
+			return RDNS_RC_NXDOMAIN;
+		}
+		else if (strcmp (str, "notimp") == 0) {
+			return RDNS_RC_NOTIMP;
+		}
+		else if (strcmp (str, "yxdomain") == 0) {
+			return RDNS_RC_YXDOMAIN;
+		}
+		else if (strcmp (str, "yxrrset") == 0) {
+			return RDNS_RC_YXRRSET;
+		}
+		else if (strcmp (str, "nxrrset") == 0) {
+			return RDNS_RC_NXRRSET;
+		}
+		else if (strcmp (str, "notauth") == 0) {
+			return RDNS_RC_NOTAUTH;
+		}
+		else if (strcmp (str, "notzone") == 0) {
+			return RDNS_RC_NOTZONE;
+		}
+		else if (strcmp (str, "timeout") == 0) {
+			return RDNS_RC_TIMEOUT;
+		}
+		else if (strcmp (str, "neterr") == 0) {
+			return RDNS_RC_NETERR;
+		}
+		else if (strcmp (str, "norec") == 0) {
+			return RDNS_RC_NOREC;
+		}
+	}
+
+	return -1;
+}
+
 uint16_t
 rdns_permutor_generate_id (void)
 {
