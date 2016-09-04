@@ -81,6 +81,10 @@ end
 
 local opts =  rspamd_config:get_all_opt('emails', 'rule')
 if opts and type(opts) == 'table' then
+  if opts['enabled'] == false then
+    logger.info('Module is disabled')
+    return
+  end
   local r = opts['rule']
 
   if r then
@@ -107,7 +111,7 @@ if opts and type(opts) == 'table' then
   end
 end
 
-if table.maxn(rules) > 0 then
+if #rules > 0 then
   -- add fake symbol to check all maps inside a single callback
   local id = rspamd_config:register_symbol({
     type = 'callback',

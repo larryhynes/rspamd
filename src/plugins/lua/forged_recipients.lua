@@ -30,9 +30,9 @@ local function check_forged_headers(task)
     local mime_rcpt = task:get_recipients(2)
     local count = 0
     if mime_rcpt then
-      count = table.maxn(mime_rcpt)
+      count = #mime_rcpt
     end
-    if count > 0 and count < table.maxn(smtp_rcpt) then
+    if count > 0 and count < #smtp_rcpt then
       task:insert_result(symbol_rcpt, 1)
     elseif count > 0 then
       -- Find pair for each smtp recipient recipient in To or Cc headers
@@ -72,6 +72,10 @@ end
 -- Configuration
 local opts =  rspamd_config:get_all_opt('forged_recipients')
 if opts then
+  if opts['enabled'] == false then
+    logger.info('Module is disabled')
+    return
+  end
   if opts['symbol_rcpt'] or opts['symbol_sender'] then
     local id = rspamd_config:register_symbol({
       callback = check_forged_headers,

@@ -414,7 +414,7 @@ local function parse_limit(str)
     limit[2] = tonumber(rate)
   end
 
-  if table.maxn(params) ~= 3 then
+  if #params ~= 3 then
     rspamd_logger.errx(rspamd_config, 'invalid limit definition: ' .. str)
     return
   end
@@ -442,6 +442,10 @@ end
 
 local opts = rspamd_config:get_all_opt('ratelimit')
 if opts then
+  if opts['enabled'] == false then
+    rspamd_logger.info('Module is disabled')
+    return
+  end
   local rates = opts['limit']
   if rates and type(rates) == 'table' then
     fun.each(parse_limit, rates)
@@ -476,7 +480,7 @@ if opts then
   end
 
   if opts['whitelisted_user'] then
-    whitelisted_user = rspamd_config:add_kv_map(opts['whitelisted_user'], 'Ratelimit whitelist user map')
+    whitelisted_user = rspamd_config:add_map(opts['whitelisted_user'], 'Ratelimit whitelist user map')
   end
 
   if opts['symbol'] then

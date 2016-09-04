@@ -395,7 +395,7 @@ local function hfilter(task)
       --FROM host check
       for _,fr in ipairs(from) do
         local fr_split = rspamd_str_split(fr['addr'], '@')
-        if table.maxn(fr_split) == 2 then
+        if #fr_split == 2 then
           check_host(task, fr_split[2], 'FROMHOST', '', '')
           if fr_split[1] == 'postmaster' then
             frombounce = true
@@ -414,7 +414,7 @@ local function hfilter(task)
   if config['rcpt_enabled'] then
     local rcpt = task:get_recipients()
     if rcpt then
-      local count_rcpt = table.maxn(rcpt)
+      local count_rcpt = #rcpt
       if frombounce then
         if count_rcpt > 1 then
           task:insert_result('HFILTER_RCPT_BOUNCEMOREONE', 1.00)
@@ -428,7 +428,7 @@ local function hfilter(task)
     local message_id = task:get_message_id()
     if message_id then
       local mid_split = rspamd_str_split(message_id, '@')
-      if table.maxn(mid_split) == 2 and not string.find(mid_split[2], 'local') then
+      if #mid_split == 2 and not string.find(mid_split[2], 'local') then
         check_host(task, mid_split[2], 'MID')
       end
     end
@@ -481,6 +481,10 @@ local symbols_from = {
 
 local opts = rspamd_config:get_all_opt('hfilter')
 if opts then
+  if opts['enabled'] == false then
+    rspamd_logger.info('Module is disabled')
+    return
+  end
   for k,v in pairs(opts) do
     config[k] = v
   end
@@ -509,6 +513,6 @@ if config['url_enabled'] then
 end
 
 --dumper(symbols_enabled)
-if table.maxn(symbols_enabled) > 0 then
+if #symbols_enabled > 0 then
   rspamd_config:register_symbols(hfilter, 1.0, "HFILTER", symbols_enabled);
 end
